@@ -1,0 +1,112 @@
+[
+  {
+    "competitor_id": "C001",
+    "competitor_name": "Jane Doe",
+    "division": "Open Ladies",
+    "judge_scores": {
+      "Judge A": 92,
+      "Judge B": 88,
+      "Judge C": 94
+    },
+    "final_placement": 1
+  },
+  {
+    "competitor_id": "C002",
+    "competitor_name": "Sarah Johnson",
+    "division": "Open Ladies",
+    "judge_scores": {
+      "Judge A": 87,
+      "Judge B": 85,
+      "Judge C": 89
+    },
+    "final_placement": 2
+  },
+  {
+    "competitor_id": "C003",
+    "competitor_name": "Emily Chen",
+    "division": "Open Ladies",
+    "judge_scores": {
+      "Judge A": 83,
+      "Judge B": 90,
+      "Judge C": 82
+    },
+    "final_placement": 3
+  },
+  {
+    "competitor_id": "C004",
+    "competitor_name": "Maria Garcia",
+    "division": "Open Ladies",
+    "judge_scores": {
+      "Judge A": 79,
+      "Judge B": 76,
+      "Judge C": 78
+    },
+    "final_placement": 4
+  },
+  {
+    "competitor_id": "C005",
+    "competitor_name": "Ashley Williams",
+    "division": "Open Ladies",
+    "judge_scores": {
+      "Judge A": 74,
+      "Judge B": 72,
+      "Judge C": 45
+    },
+    "final_placement": 5
+  },
+  {
+    "competitor_id": "C006",
+    "competitor_name": "Michael Torres",
+    "division": "Open Men",
+    "judge_scores": {
+      "Judge A": 95,
+      "Judge B": 91,
+      "Judge C": 96
+    },
+    "final_placement": 1
+  },
+  {
+    "competitor_id": "C007",
+    "competitor_name": "James Lee",
+    "division": "Open Men",
+    "judge_scores": {
+      "Judge A": 88,
+      "Judge B": 86,
+      "Judge C": 90
+    },
+    "final_placement": 2
+  },
+  {
+    "competitor_id": "C008",
+    "competitor_name": "David Kim",
+    "division": "Open Men",
+    "judge_scores": {
+      "Judge A": 82,
+      "Judge B": 99,
+      "Judge C": 83
+    },
+    "final_placement": 3
+  },
+  {
+    "competitor_id": "C009",
+    "competitor_name": "Robert Nguyen",
+    "division": "Open Men",
+    "judge_scores": {
+      "Judge A": 76,
+      "Judge B": 74,
+      "Judge C": 77
+    },
+    "final_placement": 4
+  },
+  {
+    "competitor_id": "C010",
+    "competitor_name": "Chris Martin",
+    "division": "Open Men",
+    "judge_scores": {
+      "Judge A": 70,
+      "Judge B": 68,
+      "Judge C": 71
+    },
+    "final_placement": 5
+  }
+]
