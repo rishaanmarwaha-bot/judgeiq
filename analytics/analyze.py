@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-OCDL Judge Analytics Engine
-Analyzes competition judge scoring data and produces Excel + JSON output.
+JudgeIQ Judging Analytics Engine
+Analyzes competition judge scoring data and produces per-division Excel sheets + JSON output.
 
 Usage: python analyze.py input.json output_dir/
 """
@@ -11,38 +11,323 @@ import sys
 import os
 import math
 from pathlib import Path
-from itertools import combinations
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
 from scipy import stats
 import openpyxl
-from openpyxl.styles import (
-    PatternFill, Font, Alignment, Border, Side
-)
-from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.chart import BarChart, Reference
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
 
 
-def load_data(filepath: str) -> list[dict]:
-    """Load competition JSON data."""
-    with open(filepath, "r") as f:
-        data = json.load(f)
-    if not isinstance(data, list):
-        raise ValueError("Input JSON must be an array of competitor entries.")
-    return data
+# ---------------------------------------------------------------------------
+# Format Detection & Parsing
+# ---------------------------------------------------------------------------
+
+def is_tabroom_tournament(obj) -> bool:
+    return isinstance(obj, dict) and ("categories" in obj or "judges" in obj)
 
 
-def extract_judge_names(data: list[dict]) -> list[str]:
-    """Extract all unique judge names from the dataset."""
+def parse_tabroom_tournament(data: dict) -> tuple:
+    """
+    Parse a single Tabroom tournament export.
+    Returns (entries, meta, judge_id_map).
+    judge_id_map: {judge_full_name: judge_id}
+    """
+    def _build_judge_map(judge_list):
+        """Build {str(id): 'First Last'} and {'First Last': str(id)} from a judges array."""
+        jmap, jid_map = {}, {}
+        for j in (judge_list or []):
+            if not isinstance(j, dict):
+                continue
+            jid = str(j.get("id", "")).strip()
+            name = f"{j.get('first', '')} {j.get('last', '')}".strip()
+            if jid and name:
+                jmap[jid] = name
+                jid_map[name] = jid
+        return jmap, jid_map
+
+    # Build judge map — check top-level first, then each category
+    judge_map, judge_id_map = _build_judge_map(data.get("judges", []))
+
+    ballot_records = []
+    divisions_seen = []
+
+    for category in data.get("categories", []):
+        div_name = (category.get("name") or category.get("abbr") or "Unknown").strip()
+
+        # Merge in any judges declared at the category level
+        cat_jmap, cat_jid_map = _build_judge_map(category.get("judges", []))
+        cat_jmap.update(judge_map)      # top-level takes precedence if duplicate
+        cat_jid_map.update(judge_id_map)
+
+        # Collect rounds from all possible paths
+        rounds = []
+        # Path 1: category → events → rounds
+        for event in category.get("events", []):
+            rounds.extend(event.get("rounds", []))
+        # Path 2: category → rounds (direct, no events wrapper)
+        if not rounds:
+            rounds.extend(category.get("rounds", []))
+
+        div_had_ballots = False
+        for round_ in rounds:
+            for section in (round_.get("sections") or round_.get("panels") or []):
+                for ballot in section.get("ballots", []):
+                    # Skip explicit byes/forfeits (int 1, bool True, or truthy)
+                    if ballot.get("bye") or ballot.get("forfeit"):
+                        continue
+
+                    # Normalize judge ID to string for lookup
+                    raw_judge = ballot.get("judge")
+                    if isinstance(raw_judge, dict):
+                        judge_id = str(raw_judge.get("id", "")).strip()
+                    else:
+                        judge_id = str(raw_judge).strip() if raw_judge is not None else ""
+                    judge_name = cat_jmap.get(judge_id)
+                    if not judge_name:
+                        continue
+
+                    # Competitor: entry is often a bare int/str ID
+                    comp_raw = ballot.get("competitor") or ballot.get("entry")
+                    if isinstance(comp_raw, dict):
+                        comp_id = str(comp_raw.get("id") or "")
+                        comp_name = str(comp_raw.get("name") or comp_raw.get("code") or comp_id)
+                    elif comp_raw is not None:
+                        comp_id = str(comp_raw)
+                        comp_name = comp_id
+                    else:
+                        comp_id = str(ballot.get("entry_id") or "")
+                        comp_name = comp_id
+
+                    # Speaker points: SUM all scores with tag "point"
+                    # (multiple speakers per team each get their own point score)
+                    point_scores = []
+                    for s in (ballot.get("scores") or []):
+                        if not isinstance(s, dict):
+                            continue
+                        if s.get("tag") == "point":
+                            try:
+                                point_scores.append(float(s["value"]))
+                            except (TypeError, ValueError, KeyError):
+                                pass
+
+                    # Skip ballots with no points or all-zero (bye proxy)
+                    if not point_scores or all(v == 0 for v in point_scores):
+                        continue
+                    score = sum(point_scores)
+
+                    div_had_ballots = True
+                    ballot_records.append({
+                        "competitor_id": comp_id,
+                        "competitor_name": comp_name,
+                        "division": div_name,
+                        "judge_name": judge_name,
+                        "score": score,
+                    })
+        if div_had_ballots and div_name not in divisions_seen:
+            divisions_seen.append(div_name)
+
+    entries = _aggregate_ballot_records(ballot_records)
+    meta = {
+        "tournament_name": data.get("name", "Unknown Tournament"),
+        "judge_count": len(judge_map),
+        "divisions": divisions_seen,
+        "total_ballots": len(ballot_records),
+    }
+    return entries, meta, judge_id_map
+
+
+def _aggregate_ballot_records(ballot_records: list) -> list:
+    comp_info = {}
+    scores_by_comp_judge = defaultdict(list)
+    for record in ballot_records:
+        cid = record["competitor_id"]
+        if cid not in comp_info:
+            comp_info[cid] = {"name": record["competitor_name"], "division": record["division"]}
+        scores_by_comp_judge[(cid, record["judge_name"])].append(record["score"])
+
+    result = []
+    for comp_id, info in comp_info.items():
+        judge_scores = {
+            jname: round(sum(sc) / len(sc), 2)
+            for (cid, jname), sc in scores_by_comp_judge.items()
+            if cid == comp_id
+        }
+        result.append({
+            "competitor_id": comp_id,
+            "competitor_name": info["name"],
+            "division": info["division"],
+            "judge_scores": judge_scores,
+            "final_placement": None,
+        })
+    return result
+
+
+def parse_unknown_format(data) -> tuple:
+    def find_score_maps(obj, depth=0):
+        if depth > 12:
+            return []
+        found = []
+        if isinstance(obj, dict):
+            numeric = {k: v for k, v in obj.items()
+                       if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 300}
+            non_numeric = {k: v for k, v in obj.items() if k not in numeric}
+            if len(numeric) >= 2:
+                comp_id = str(non_numeric.get("id") or non_numeric.get("competitor_id") or "")
+                comp_name = str(non_numeric.get("name") or non_numeric.get("competitor_name") or comp_id)
+                division = str(non_numeric.get("division") or non_numeric.get("category") or "Unknown")
+                placement = non_numeric.get("final_placement") or non_numeric.get("placement")
+                found.append({
+                    "competitor_id": comp_id,
+                    "competitor_name": comp_name,
+                    "division": division,
+                    "judge_scores": {str(k): float(v) for k, v in numeric.items()},
+                    "final_placement": int(placement) if placement is not None else None,
+                })
+            for v in obj.values():
+                found.extend(find_score_maps(v, depth + 1))
+        elif isinstance(obj, list):
+            for item in obj:
+                found.extend(find_score_maps(item, depth + 1))
+        return found
+
+    entries = find_score_maps(data)
+    seen = set()
+    unique = []
+    for e in entries:
+        key = (e["competitor_id"], frozenset(e["judge_scores"].items()))
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+
+    all_judges = set()
+    for e in unique:
+        all_judges.update(e["judge_scores"].keys())
+
+    return unique, {"judge_count": len(all_judges), "entry_count": len(unique)}, {}
+
+
+def load_data(filepath: str) -> tuple:
+    """
+    Load and auto-detect JSON format.
+    Returns (entries, format_info, judge_id_map).
+    format_info["judge_id_map"] = {judge_full_name: judge_id}
+    """
+    for enc in ("utf-8", "latin-1", "utf-8-sig"):
+        try:
+            with open(filepath, "r", encoding=enc) as f:
+                data = json.load(f)
+            break
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            data = None
+    if data is None:
+        raise ValueError("Could not decode the JSON file. Ensure it is valid UTF-8 or Latin-1 encoded.")
+
+    # ── Tabroom single tournament ──────────────────────────────────────────
+    if is_tabroom_tournament(data):
+        entries, meta, judge_id_map = parse_tabroom_tournament(data)
+        if not entries:
+            raise ValueError(
+                f"Tabroom tournament '{meta.get('tournament_name', '')}' detected but no "
+                "scorable ballots found. Ensure rounds have speaker point scores (tag='point') "
+                "that are not byes or forfeits."
+            )
+        format_info = {
+            "format": "tabroom",
+            "label": f"Tabroom tournament detected: {meta['tournament_name']}",
+            "tournament_name": meta["tournament_name"],
+            "judge_count": meta["judge_count"],
+            "division_count": len(meta["divisions"]),
+            "divisions": meta["divisions"],
+            "total_ballots": meta["total_ballots"],
+            "judge_id_map": judge_id_map,
+        }
+        return entries, format_info
+
+    # ── Tabroom multi-tournament array ─────────────────────────────────────
+    if isinstance(data, list) and data and all(is_tabroom_tournament(d) for d in data):
+        all_entries, all_divisions, all_id_map = [], [], {}
+        total_ballots, tournament_names = 0, []
+
+        for tournament in data:
+            t_entries, t_meta, t_id_map = parse_tabroom_tournament(tournament)
+            all_entries.extend(t_entries)
+            total_ballots += t_meta["total_ballots"]
+            tournament_names.append(t_meta["tournament_name"])
+            all_id_map.update(t_id_map)
+            for div in t_meta["divisions"]:
+                if div not in all_divisions:
+                    all_divisions.append(div)
+
+        if not all_entries:
+            raise ValueError("Multi-tournament Tabroom export detected but no scorable ballots found.")
+
+        names_str = ", ".join(tournament_names[:3])
+        if len(tournament_names) > 3:
+            names_str += f" (+{len(tournament_names) - 3} more)"
+
+        all_judges = set()
+        for e in all_entries:
+            all_judges.update(e["judge_scores"].keys())
+
+        format_info = {
+            "format": "tabroom_multi",
+            "label": f"Multi-tournament Tabroom export: {names_str}",
+            "tournament_names": tournament_names,
+            "judge_count": len(all_judges),
+            "division_count": len(all_divisions),
+            "divisions": all_divisions,
+            "total_ballots": total_ballots,
+            "judge_id_map": all_id_map,
+        }
+        return all_entries, format_info
+
+    # ── Legacy array with judge_scores ────────────────────────────────────
+    if isinstance(data, list) and data and all(isinstance(d, dict) and "judge_scores" in d for d in data):
+        all_judges = set()
+        for e in data:
+            all_judges.update(e.get("judge_scores", {}).keys())
+        format_info = {
+            "format": "legacy_array",
+            "label": f"Custom format detected — found {len(all_judges)} judges with scoring data",
+            "judge_count": len(all_judges),
+            "entry_count": len(data),
+            "judge_id_map": {},
+        }
+        return data, format_info
+
+    # ── Unknown: heuristic scan ────────────────────────────────────────────
+    entries, meta, judge_id_map = parse_unknown_format(data)
+    if not entries:
+        raise ValueError(
+            "Could not extract scoring data from this JSON. "
+            "Supported formats: Tabroom tournament export (object with 'categories'/'judges'), "
+            "Tabroom multi-tournament array, or an array of objects with a 'judge_scores' key."
+        )
+    format_info = {
+        "format": "unknown",
+        "label": f"Custom format detected — found {meta['judge_count']} judges with scoring data",
+        "judge_count": meta["judge_count"],
+        "entry_count": meta["entry_count"],
+        "judge_id_map": {},
+    }
+    return entries, format_info
+
+
+# ---------------------------------------------------------------------------
+# Score Matrix
+# ---------------------------------------------------------------------------
+
+def extract_judge_names(data: list) -> list:
     names = set()
     for entry in data:
         names.update(entry.get("judge_scores", {}).keys())
     return sorted(names)
 
 
-def build_score_matrix(data: list[dict], judges: list[str]) -> pd.DataFrame:
-    """Build a DataFrame with competitors as rows and judges as columns."""
+def build_score_matrix(data: list, judges: list) -> pd.DataFrame:
     rows = []
     for entry in data:
         row = {
@@ -58,478 +343,296 @@ def build_score_matrix(data: list[dict], judges: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def compute_judge_stats(df: pd.DataFrame, judges: list[str]) -> pd.DataFrame:
+# ---------------------------------------------------------------------------
+# Per-Division Judge Statistics (new format)
+# ---------------------------------------------------------------------------
+
+STAT_COLUMNS = [
+    "Severity_Rank", "Judge_ID", "Judge_Full_Name", "Number_of_Scores",
+    "Mean", "Z_Severity_Index", "Absolute_Severity", "Bias_Direction",
+    "Mann_Whitney_U", "p_value",
+]
+
+
+def compute_division_judge_stats(
+    df_div: pd.DataFrame, judges: list, judge_id_map: dict
+) -> pd.DataFrame:
     """
-    Compute per-judge statistics:
-    - mean, std, min, max
-    - bias: judge mean - overall average across all judges
-    - consistency: inverse of coefficient of variation (0-100 scale)
-    - correlation with final placement (Spearman rho)
+    Compute per-judge stats for a single division's score matrix slice.
+    Returns a DataFrame with STAT_COLUMNS, sorted by Severity_Rank ascending.
     """
-    # Overall average per competitor (mean across judges)
-    score_cols = df[judges].copy()
-    overall_avg = score_cols.mean(axis=1)
+    valid_judges = [
+        j for j in judges
+        if j in df_div.columns and df_div[j].dropna().shape[0] > 0
+    ]
+    if len(valid_judges) < 2:
+        return pd.DataFrame(columns=STAT_COLUMNS)
+
+    # Build per-judge score arrays and means
+    judge_scores_dict = {j: df_div[j].dropna().values for j in valid_judges}
+    judge_means = {j: float(v.mean()) for j, v in judge_scores_dict.items()}
+
+    means_arr = np.array(list(judge_means.values()))
+    mean_of_means = float(means_arr.mean())
+    std_of_means = float(means_arr.std(ddof=1)) if len(means_arr) > 1 else 0.0
 
     records = []
-    for judge in judges:
-        col = df[judge].dropna()
-        if col.empty:
-            continue
+    for judge in valid_judges:
+        scores = judge_scores_dict[judge]
+        n = len(scores)
+        mean_score = judge_means[judge]
 
-        mean_score = float(col.mean())
-        std_score = float(col.std(ddof=1)) if len(col) > 1 else 0.0
-        min_score = float(col.min())
-        max_score = float(col.max())
+        # Z_Severity_Index: how many std-devs of judge-mean spread this judge is from center
+        z_severity = (mean_score - mean_of_means) / std_of_means if std_of_means > 0 else 0.0
+        abs_severity = abs(z_severity)
+        bias_direction = "High-Side" if z_severity >= 0 else "Low-Side"
 
-        # Bias: judge's mean minus the overall mean across all judges
-        judge_avg = mean_score
-        global_avg = float(overall_avg.mean())
-        bias = judge_avg - global_avg
+        # Mann-Whitney U: this judge's scores vs all other judges' scores pooled
+        other_scores = np.concatenate([
+            v for jn, v in judge_scores_dict.items() if jn != judge
+        ])
 
-        # Consistency: 100 - coefficient of variation (capped 0-100)
-        if mean_score != 0:
-            cv = (std_score / abs(mean_score)) * 100
+        if n >= 3 and len(other_scores) >= 3:
+            try:
+                u_stat, p_val = stats.mannwhitneyu(scores, other_scores, alternative="two-sided")
+            except ValueError:
+                u_stat, p_val = np.nan, np.nan
         else:
-            cv = 0.0
-        consistency = max(0.0, min(100.0, 100.0 - cv))
+            u_stat, p_val = np.nan, np.nan
 
-        # Spearman correlation with final placement
-        placement_col = df["final_placement"].dropna()
-        valid_mask = df[judge].notna() & df["final_placement"].notna()
-        if valid_mask.sum() >= 3:
-            rho, pval = stats.spearmanr(
-                df.loc[valid_mask, judge],
-                df.loc[valid_mask, "final_placement"]
-            )
-        else:
-            rho, pval = np.nan, np.nan
+        jid = judge_id_map.get(judge, "")
 
         records.append({
-            "judge": judge,
-            "mean_score": round(mean_score, 3),
-            "std_dev": round(std_score, 3),
-            "min_score": round(min_score, 3),
-            "max_score": round(max_score, 3),
-            "bias_vs_average": round(bias, 3),
-            "consistency_score": round(consistency, 3),
-            "spearman_rho_placement": round(rho, 4) if not math.isnan(rho) else None,
-            "spearman_pval": round(pval, 4) if not math.isnan(pval) else None,
+            "Judge_ID": jid,
+            "Judge_Full_Name": judge,
+            "Number_of_Scores": int(n),
+            "Mean": round(mean_score, 2),
+            "Z_Severity_Index": round(z_severity, 4),
+            "Absolute_Severity": round(abs_severity, 4),
+            "Bias_Direction": bias_direction,
+            "Mann_Whitney_U": round(float(u_stat), 1) if not (isinstance(u_stat, float) and math.isnan(u_stat)) else None,
+            "p_value": float(p_val) if not (isinstance(p_val, float) and math.isnan(p_val)) else None,
         })
 
-    return pd.DataFrame(records)
+    df_result = pd.DataFrame(records)
+    df_result = df_result.sort_values("Absolute_Severity", ascending=False).reset_index(drop=True)
+    df_result.insert(0, "Severity_Rank", range(1, len(df_result) + 1))
+    return df_result[STAT_COLUMNS]
 
 
-def compute_kendall_tau_matrix(df: pd.DataFrame, judges: list[str]) -> pd.DataFrame:
-    """
-    Compute pairwise Kendall's tau correlation between all judge pairs.
-    Returns a DataFrame (matrix) with judges as index and columns.
-    """
-    matrix = pd.DataFrame(index=judges, columns=judges, dtype=float)
+# ---------------------------------------------------------------------------
+# Division Summary Stats (for dashboard)
+# ---------------------------------------------------------------------------
+
+def compute_division_summary(df_div: pd.DataFrame, judges: list) -> dict:
+    """Compute overall division-level stats for the dashboard."""
+    all_scores = []
     for j in judges:
-        matrix.loc[j, j] = 1.0
+        if j in df_div.columns:
+            all_scores.extend(df_div[j].dropna().tolist())
 
-    for j1, j2 in combinations(judges, 2):
-        valid = df[[j1, j2]].dropna()
-        if len(valid) >= 3:
-            tau, _ = stats.kendalltau(valid[j1], valid[j2])
-        else:
-            tau = np.nan
-        matrix.loc[j1, j2] = round(tau, 4) if not math.isnan(tau) else np.nan
-        matrix.loc[j2, j1] = round(tau, 4) if not math.isnan(tau) else np.nan
+    if not all_scores:
+        return {}
 
-    return matrix.astype(float)
+    arr = np.array(all_scores)
+    mean = float(arr.mean())
+    std = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
 
+    # Histogram for distribution chart
+    histogram = []
+    if std > 0 and len(arr) >= 4:
+        n_bins = min(20, max(8, int(np.sqrt(len(arr)))))
+        counts, bin_edges = np.histogram(arr, bins=n_bins)
+        histogram = [
+            {"bin_center": round(float((bin_edges[i] + bin_edges[i + 1]) / 2), 2), "count": int(counts[i])}
+            for i in range(len(counts))
+        ]
 
-def detect_outliers(df: pd.DataFrame, judges: list[str], threshold: float = 2.0) -> pd.DataFrame:
-    """
-    Z-score outlier detection per judge column.
-    Returns rows where any judge score deviates > threshold standard deviations.
-    """
-    outlier_rows = []
-    score_cols = df[judges].copy()
-
-    for judge in judges:
-        col = score_cols[judge].dropna()
-        if len(col) < 3:
-            continue
-        mean_j = col.mean()
-        std_j = col.std(ddof=1)
-        if std_j == 0:
-            continue
-
-        z_scores = (score_cols[judge] - mean_j) / std_j
-        mask = z_scores.abs() > threshold
-
-        for idx in df[mask].index:
-            outlier_rows.append({
-                "competitor_id": df.loc[idx, "competitor_id"],
-                "competitor_name": df.loc[idx, "competitor_name"],
-                "division": df.loc[idx, "division"],
-                "judge": judge,
-                "score": df.loc[idx, judge],
-                "z_score": round(float(z_scores[idx]), 4),
-                "direction": "High" if z_scores[idx] > 0 else "Low",
-            })
-
-    if outlier_rows:
-        return pd.DataFrame(outlier_rows).sort_values("z_score", key=abs, ascending=False)
-    return pd.DataFrame(columns=["competitor_id", "competitor_name", "division", "judge", "score", "z_score", "direction"])
+    active_judges = [j for j in judges if j in df_div.columns and df_div[j].notna().any()]
+    return {
+        "mean": round(mean, 3),
+        "std": round(std, 3),
+        "total_judges": len(active_judges),
+        "total_scores": len(all_scores),
+        "histogram": histogram,
+    }
 
 
-def build_summary(df: pd.DataFrame, judges: list[str], judge_stats: pd.DataFrame) -> dict:
-    """Build a high-level summary dictionary."""
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+def build_summary(df: pd.DataFrame, judges: list, division_stats: dict) -> dict:
+    # Flatten all division stats to find highlights
+    all_rows = pd.concat(division_stats.values(), ignore_index=True) if division_stats else pd.DataFrame()
+
+    def pick(col, ascending):
+        if all_rows.empty or col not in all_rows.columns:
+            return None
+        row = all_rows.sort_values(col, ascending=ascending).iloc[0]
+        return str(row["Judge_Full_Name"])
+
     return {
         "total_competitors": int(len(df)),
         "total_judges": int(len(judges)),
         "divisions": list(df["division"].dropna().unique()),
         "judge_names": judges,
-        "most_generous_judge": judge_stats.sort_values("bias_vs_average", ascending=False).iloc[0]["judge"]
-        if not judge_stats.empty else None,
-        "most_strict_judge": judge_stats.sort_values("bias_vs_average", ascending=True).iloc[0]["judge"]
-        if not judge_stats.empty else None,
-        "most_consistent_judge": judge_stats.sort_values("consistency_score", ascending=False).iloc[0]["judge"]
-        if not judge_stats.empty else None,
-        "least_consistent_judge": judge_stats.sort_values("consistency_score", ascending=True).iloc[0]["judge"]
-        if not judge_stats.empty else None,
+        "most_generous_judge": pick("Z_Severity_Index", ascending=False),
+        "most_strict_judge": pick("Z_Severity_Index", ascending=True),
+        "most_consistent_judge": pick("Absolute_Severity", ascending=True),
+        "least_consistent_judge": pick("Absolute_Severity", ascending=False),
     }
 
 
 # ---------------------------------------------------------------------------
-# Excel Export
+# Excel Export — per-division sheets
 # ---------------------------------------------------------------------------
 
-DARK_FILL = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
-HEADER_FILL = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
-ALT_FILL = PatternFill(start_color="374151", end_color="374151", fill_type="solid")
-ACCENT_FILL = PatternFill(start_color="7C3AED", end_color="7C3AED", fill_type="solid")
-DANGER_FILL = PatternFill(start_color="DC2626", end_color="DC2626", fill_type="solid")
-WARNING_FILL = PatternFill(start_color="D97706", end_color="D97706", fill_type="solid")
-
-WHITE_FONT = Font(color="FFFFFF", bold=False, name="Calibri", size=11)
-HEADER_FONT = Font(color="FFFFFF", bold=True, name="Calibri", size=11)
-TITLE_FONT = Font(color="FFFFFF", bold=True, name="Calibri", size=14)
-
-THIN_BORDER = Border(
-    left=Side(style="thin", color="6B7280"),
-    right=Side(style="thin", color="6B7280"),
-    top=Side(style="thin", color="6B7280"),
-    bottom=Side(style="thin", color="6B7280"),
-)
+HEADER_FILL  = PatternFill(start_color="1B3A6B", end_color="1B3A6B", fill_type="solid")
+HIGH_FILL    = PatternFill(start_color="FFD7D7", end_color="FFD7D7", fill_type="solid")
+WARN_FILL    = PatternFill(start_color="FFFACD", end_color="FFFACD", fill_type="solid")
+NORMAL_FILL  = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+HEADER_FONT  = Font(color="FFFFFF", bold=True, name="Calibri", size=11)
+DATA_FONT    = Font(color="000000", name="Calibri", size=11)
+CENTER       = Alignment(horizontal="center", vertical="center", wrap_text=False)
 
 
-def style_header_row(ws, row_num: int, num_cols: int):
-    for col in range(1, num_cols + 1):
-        cell = ws.cell(row=row_num, column=col)
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = THIN_BORDER
+def _format_p_value(val) -> str:
+    """Format p-value as uppercase scientific notation: '3.41E-04'"""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return "N/A"
+    return f"{val:.2E}"
 
 
-def style_data_row(ws, row_num: int, num_cols: int, alt: bool = False):
-    fill = ALT_FILL if alt else DARK_FILL
-    for col in range(1, num_cols + 1):
-        cell = ws.cell(row=row_num, column=col)
-        cell.fill = fill
-        cell.font = WHITE_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = THIN_BORDER
+def _auto_width(ws):
+    """Set each column to fit its widest cell."""
+    for col_cells in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col_cells[0].column)
+        for cell in col_cells:
+            try:
+                cell_len = len(str(cell.value)) if cell.value is not None else 0
+                max_len = max(max_len, cell_len)
+            except Exception:
+                pass
+        ws.column_dimensions[col_letter].width = max_len + 4
 
 
-def write_dataframe_to_sheet(ws, df: pd.DataFrame, start_row: int = 1):
-    """Write a DataFrame to a worksheet with styling."""
-    cols = list(df.columns)
-    num_cols = len(cols)
-
-    # Header
-    for col_idx, col_name in enumerate(cols, start=1):
-        ws.cell(row=start_row, column=col_idx, value=str(col_name))
-    style_header_row(ws, start_row, num_cols)
-
-    # Data rows
-    for row_offset, (_, row_data) in enumerate(df.iterrows()):
-        r = start_row + row_offset + 1
-        for col_idx, val in enumerate(row_data, start=1):
-            if pd.isna(val) if not isinstance(val, str) else False:
-                ws.cell(row=r, column=col_idx, value="N/A")
-            else:
-                ws.cell(row=r, column=col_idx, value=val)
-        style_data_row(ws, r, num_cols, alt=(row_offset % 2 == 1))
-
-    return start_row + len(df) + 1
-
-
-def export_excel(
-    df: pd.DataFrame,
-    judges: list[str],
-    judge_stats: pd.DataFrame,
-    tau_matrix: pd.DataFrame,
-    outliers: pd.DataFrame,
-    summary: dict,
-    output_path: str,
-):
+def export_excel(division_stats: dict, output_path: str):
+    """
+    Write one sheet per division. Each sheet has the 10 required columns
+    with navy header, severity-based row color-coding, and frozen header row.
+    """
     wb = openpyxl.Workbook()
-    wb.remove(wb.active)  # remove default sheet
+    wb.remove(wb.active)
 
-    # -------------------------------------------------------------------
-    # Sheet 1: Summary
-    # -------------------------------------------------------------------
-    ws_summary = wb.create_sheet("Summary")
-    ws_summary.sheet_view.showGridLines = False
+    for div_name, df in division_stats.items():
+        ws = wb.create_sheet(title=div_name[:31])  # Excel sheet name max 31 chars
+        ws.freeze_panes = "A2"
 
-    # Title
-    ws_summary["A1"] = "OCDL Judge Analytics Report"
-    ws_summary["A1"].font = TITLE_FONT
-    ws_summary["A1"].fill = ACCENT_FILL
-    ws_summary["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    ws_summary.merge_cells("A1:D1")
-    ws_summary.row_dimensions[1].height = 30
+        if df.empty:
+            ws.cell(row=1, column=1, value=f"No data for division: {div_name}")
+            continue
 
-    summary_items = [
-        ("Total Competitors", summary["total_competitors"]),
-        ("Total Judges", summary["total_judges"]),
-        ("Divisions", ", ".join(summary["divisions"])),
-        ("Judge Names", ", ".join(summary["judge_names"])),
-        ("Most Generous Judge", summary.get("most_generous_judge", "N/A")),
-        ("Most Strict Judge", summary.get("most_strict_judge", "N/A")),
-        ("Most Consistent Judge", summary.get("most_consistent_judge", "N/A")),
-        ("Least Consistent Judge", summary.get("least_consistent_judge", "N/A")),
-    ]
+        # Header row
+        for col_idx, col_name in enumerate(STAT_COLUMNS, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=col_name)
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = CENTER
 
-    ws_summary["A3"] = "Metric"
-    ws_summary["B3"] = "Value"
-    style_header_row(ws_summary, 3, 2)
+        # Data rows
+        for row_offset, (_, row) in enumerate(df.iterrows()):
+            r = row_offset + 2
+            abs_sev = row.get("Absolute_Severity") or 0.0
+            if abs_sev > 1.5:
+                row_fill = HIGH_FILL
+            elif abs_sev > 1.0:
+                row_fill = WARN_FILL
+            else:
+                row_fill = NORMAL_FILL
 
-    for i, (label, value) in enumerate(summary_items):
-        r = 4 + i
-        ws_summary.cell(row=r, column=1, value=label)
-        ws_summary.cell(row=r, column=2, value=str(value))
-        style_data_row(ws_summary, r, 2, alt=(i % 2 == 1))
+            for col_idx, col_name in enumerate(STAT_COLUMNS, start=1):
+                raw = row.get(col_name)
 
-    ws_summary.column_dimensions["A"].width = 28
-    ws_summary.column_dimensions["B"].width = 40
+                # Format p_value as scientific notation string
+                if col_name == "p_value":
+                    display = _format_p_value(raw)
+                elif col_name == "Mann_Whitney_U" and raw is None:
+                    display = "N/A"
+                elif raw is None or (isinstance(raw, float) and math.isnan(raw)):
+                    display = "N/A"
+                else:
+                    display = raw
 
-    # -------------------------------------------------------------------
-    # Sheet 2: Judge Stats
-    # -------------------------------------------------------------------
-    ws_stats = wb.create_sheet("Judge Stats")
-    ws_stats.sheet_view.showGridLines = False
+                cell = ws.cell(row=r, column=col_idx, value=display)
+                cell.fill = row_fill
+                cell.font = DATA_FONT
+                cell.alignment = CENTER
 
-    ws_stats["A1"] = "Per-Judge Statistical Analysis"
-    ws_stats["A1"].font = TITLE_FONT
-    ws_stats["A1"].fill = ACCENT_FILL
-    ws_stats["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    num_stat_cols = len(judge_stats.columns)
-    ws_stats.merge_cells(f"A1:{chr(64 + num_stat_cols)}1")
-    ws_stats.row_dimensions[1].height = 30
-
-    write_dataframe_to_sheet(ws_stats, judge_stats, start_row=3)
-
-    for col_letter in "ABCDEFGHIJ"[:num_stat_cols]:
-        ws_stats.column_dimensions[col_letter].width = 22
-
-    # -------------------------------------------------------------------
-    # Sheet 3: Score Matrix
-    # -------------------------------------------------------------------
-    ws_matrix = wb.create_sheet("Score Matrix")
-    ws_matrix.sheet_view.showGridLines = False
-
-    ws_matrix["A1"] = "Competitor Score Matrix"
-    ws_matrix["A1"].font = TITLE_FONT
-    ws_matrix["A1"].fill = ACCENT_FILL
-    ws_matrix["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    display_cols = ["competitor_id", "competitor_name", "division", "final_placement"] + judges
-    display_df = df[display_cols].copy()
-    total_matrix_cols = len(display_cols)
-    ws_matrix.merge_cells(f"A1:{chr(64 + total_matrix_cols)}1")
-    ws_matrix.row_dimensions[1].height = 30
-
-    write_dataframe_to_sheet(ws_matrix, display_df, start_row=3)
-
-    ws_matrix.column_dimensions["A"].width = 14
-    ws_matrix.column_dimensions["B"].width = 22
-    ws_matrix.column_dimensions["C"].width = 18
-    ws_matrix.column_dimensions["D"].width = 16
-    for i, _ in enumerate(judges):
-        ws_matrix.column_dimensions[chr(69 + i)].width = 14
-
-    # -------------------------------------------------------------------
-    # Sheet 4: Correlations (Kendall's Tau)
-    # -------------------------------------------------------------------
-    ws_corr = wb.create_sheet("Correlations")
-    ws_corr.sheet_view.showGridLines = False
-
-    ws_corr["A1"] = "Kendall's Tau Correlation Matrix"
-    ws_corr["A1"].font = TITLE_FONT
-    ws_corr["A1"].fill = ACCENT_FILL
-    ws_corr["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    num_corr_cols = len(judges) + 1
-    ws_corr.merge_cells(f"A1:{chr(64 + num_corr_cols)}1")
-    ws_corr.row_dimensions[1].height = 30
-
-    # Header row
-    ws_corr.cell(row=3, column=1, value="Judge")
-    for col_idx, judge in enumerate(judges, start=2):
-        ws_corr.cell(row=3, column=col_idx, value=judge)
-    style_header_row(ws_corr, 3, num_corr_cols)
-
-    # Data rows
-    for row_offset, judge_row in enumerate(judges):
-        r = 4 + row_offset
-        ws_corr.cell(row=r, column=1, value=judge_row)
-        for col_idx, judge_col in enumerate(judges, start=2):
-            val = tau_matrix.loc[judge_row, judge_col]
-            ws_corr.cell(row=r, column=col_idx, value=round(float(val), 4) if not math.isnan(float(val)) else "N/A")
-        style_data_row(ws_corr, r, num_corr_cols, alt=(row_offset % 2 == 1))
-
-        # Color-code diagonal
-        diag_cell = ws_corr.cell(row=r, column=row_offset + 2)
-        diag_cell.fill = ACCENT_FILL
-
-    for col_letter in "ABCDEFGHIJ"[:num_corr_cols]:
-        ws_corr.column_dimensions[col_letter].width = 16
-
-    # -------------------------------------------------------------------
-    # Sheet 5: Outliers
-    # -------------------------------------------------------------------
-    ws_out = wb.create_sheet("Outliers")
-    ws_out.sheet_view.showGridLines = False
-
-    ws_out["A1"] = "Z-Score Outlier Detection (|z| > 2.0)"
-    ws_out["A1"].font = TITLE_FONT
-    ws_out["A1"].fill = DANGER_FILL
-    ws_out["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    num_out_cols = len(outliers.columns) if not outliers.empty else 7
-    ws_out.merge_cells(f"A1:{chr(64 + num_out_cols)}1")
-    ws_out.row_dimensions[1].height = 30
-
-    if outliers.empty:
-        ws_out.cell(row=3, column=1, value="No outliers detected.")
-        ws_out.cell(row=3, column=1).font = WHITE_FONT
-        ws_out.cell(row=3, column=1).fill = DARK_FILL
-    else:
-        write_dataframe_to_sheet(ws_out, outliers, start_row=3)
-        # Color-code high/low outliers
-        for row_offset in range(len(outliers)):
-            r = 5 + row_offset
-            direction = outliers.iloc[row_offset]["direction"]
-            fill = DANGER_FILL if direction == "High" else WARNING_FILL
-            for col in range(1, num_out_cols + 1):
-                cell = ws_out.cell(row=r, column=col)
-                cell.fill = fill
-
-    for col_letter in "ABCDEFG"[:num_out_cols]:
-        ws_out.column_dimensions[col_letter].width = 20
-
-    # Set tab colors
-    ws_summary.sheet_properties.tabColor = "4F46E5"
-    ws_stats.sheet_properties.tabColor = "7C3AED"
-    ws_matrix.sheet_properties.tabColor = "0EA5E9"
-    ws_corr.sheet_properties.tabColor = "10B981"
-    ws_out.sheet_properties.tabColor = "DC2626"
+        _auto_width(ws)
 
     wb.save(output_path)
 
 
 # ---------------------------------------------------------------------------
-# JSON Export
+# JSON helpers
 # ---------------------------------------------------------------------------
 
-def export_json(
-    summary: dict,
-    judge_stats: pd.DataFrame,
-    tau_matrix: pd.DataFrame,
-    outliers: pd.DataFrame,
-    output_path: str,
-):
-    def safe_val(v):
-        if isinstance(v, float) and math.isnan(v):
-            return None
-        if isinstance(v, (np.integer,)):
-            return int(v)
-        if isinstance(v, (np.floating,)):
-            return float(v)
-        return v
+def _safe(v):
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    if isinstance(v, (np.floating,)):
+        return float(v)
+    return v
 
-    def df_to_list(df: pd.DataFrame) -> list:
-        result = []
-        for _, row in df.iterrows():
-            result.append({k: safe_val(v) for k, v in row.items()})
-        return result
 
-    tau_dict = {}
-    for j1 in tau_matrix.index:
-        tau_dict[j1] = {}
-        for j2 in tau_matrix.columns:
-            val = tau_matrix.loc[j1, j2]
-            tau_dict[j1][j2] = safe_val(val)
-
-    output = {
-        "summary": summary,
-        "judge_stats": df_to_list(judge_stats),
-        "kendall_tau_matrix": tau_dict,
-        "outliers": df_to_list(outliers),
-    }
-
-    with open(output_path, "w") as f:
-        json.dump(output, f, indent=2, default=str)
+def _df_to_list(df: pd.DataFrame) -> list:
+    return [{k: _safe(v) for k, v in row.items()} for _, row in df.iterrows()]
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main entry point
 # ---------------------------------------------------------------------------
 
 def analyze(input_path: str, output_dir: str) -> dict:
-    """
-    Run full analysis. Returns the result dict (same as JSON output).
-    """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    data = load_data(input_path)
+    data, format_info = load_data(input_path)
+    judge_id_map = format_info.get("judge_id_map", {})
+
     judges = extract_judge_names(data)
     df = build_score_matrix(data, judges)
 
-    judge_stats = compute_judge_stats(df, judges)
-    tau_matrix = compute_kendall_tau_matrix(df, judges)
-    outliers = detect_outliers(df, judges)
-    summary = build_summary(df, judges, judge_stats)
+    # Per-division stats
+    divisions = list(df["division"].dropna().unique())
+    division_stats = {}
+    division_stats_list = {}  # for JSON output
+    division_summary = {}
+    for div in divisions:
+        df_div = df[df["division"] == div].copy()
+        div_judges = [j for j in judges if j in df_div.columns and df_div[j].notna().any()]
+        div_df = compute_division_judge_stats(df_div, div_judges, judge_id_map)
+        division_stats[div] = div_df
+        division_stats_list[div] = _df_to_list(div_df)
+        division_summary[div] = compute_division_summary(df_div, div_judges)
 
-    excel_path = os.path.join(output_dir, "ocdl_judge_analytics.xlsx")
-    json_path = os.path.join(output_dir, "ocdl_judge_analytics.json")
+    summary = build_summary(df, judges, division_stats)
 
-    export_excel(df, judges, judge_stats, tau_matrix, outliers, summary, excel_path)
-    export_json(summary, judge_stats, tau_matrix, outliers, json_path)
+    excel_path = os.path.join(output_dir, "judgeiq_analytics.xlsx")
+    export_excel(division_stats, excel_path)
 
-    # Build return dict (mirrors JSON structure)
-    def safe_val(v):
-        if isinstance(v, float) and math.isnan(v):
-            return None
-        if isinstance(v, (np.integer,)):
-            return int(v)
-        if isinstance(v, (np.floating,)):
-            return float(v)
-        return v
-
-    def df_to_list(df_: pd.DataFrame) -> list:
-        result = []
-        for _, row in df_.iterrows():
-            result.append({k: safe_val(v) for k, v in row.items()})
-        return result
-
-    tau_dict = {}
-    for j1 in tau_matrix.index:
-        tau_dict[j1] = {}
-        for j2 in tau_matrix.columns:
-            val = tau_matrix.loc[j1, j2]
-            tau_dict[j1][j2] = safe_val(val)
+    # Strip judge_id_map from format_info before returning (too verbose for response)
+    format_info_clean = {k: v for k, v in format_info.items() if k != "judge_id_map"}
 
     return {
+        "format_info": format_info_clean,
         "summary": summary,
-        "judge_stats": df_to_list(judge_stats),
-        "kendall_tau_matrix": tau_dict,
-        "outliers": df_to_list(outliers),
+        "division_stats": division_stats_list,
+        "division_summary": division_summary,
         "excel_path": excel_path,
-        "json_path": json_path,
     }
 
 
@@ -538,9 +641,5 @@ if __name__ == "__main__":
         print("Usage: python analyze.py input.json output_dir/", file=sys.stderr)
         sys.exit(1)
 
-    input_file = sys.argv[1]
-    out_dir = sys.argv[2]
-
-    result = analyze(input_file, out_dir)
-    # Print JSON to stdout for subprocess capture
+    result = analyze(sys.argv[1], sys.argv[2])
     print(json.dumps(result, indent=2, default=str))

@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
 
     // ── Write uploaded file to a temp directory ───────────────────────────
     const sessionId = randomUUID();
-    sessionDir = join(tmpdir(), `ocdl-${sessionId}`);
+    sessionDir = join(tmpdir(), `judgeiq-${sessionId}`);
     mkdirSync(sessionDir, { recursive: true });
 
     const inputPath = join(sessionDir, "input.json");
@@ -62,20 +62,37 @@ export async function POST(request: NextRequest) {
     const fileBuffer = Buffer.from(await blob.arrayBuffer());
     writeFileSync(inputPath, fileBuffer);
 
-    // ── Validate JSON ──────────────────────────────────────────────────────
+    // ── Validate JSON (try utf-8, then latin-1) ────────────────────────────
     let parsedInput: unknown;
     try {
-      parsedInput = JSON.parse(fileBuffer.toString("utf-8"));
+      const text = fileBuffer.toString("utf-8");
+      parsedInput = JSON.parse(text);
     } catch {
-      return NextResponse.json(
-        { error: "Uploaded file is not valid JSON. Please check the file and try again." },
-        { status: 400 }
-      );
+      try {
+        // Tabroom exports are sometimes latin-1 encoded
+        const text = fileBuffer.toString("latin1");
+        parsedInput = JSON.parse(text);
+      } catch {
+        return NextResponse.json(
+          { error: "Uploaded file is not valid JSON. Please check the file and try again." },
+          { status: 400 }
+        );
+      }
     }
 
-    if (!Array.isArray(parsedInput) || parsedInput.length === 0) {
+    const isTabroom =
+      typeof parsedInput === "object" &&
+      parsedInput !== null &&
+      !Array.isArray(parsedInput);
+    const isLegacyArray =
+      Array.isArray(parsedInput) && (parsedInput as unknown[]).length > 0;
+
+    if (!isTabroom && !isLegacyArray) {
       return NextResponse.json(
-        { error: "JSON must be a non-empty array of competitor entries." },
+        {
+          error:
+            "Invalid JSON format. Upload a Tabroom tournament export (object with 'categories' and 'judges') or a non-empty array of competitor entries.",
+        },
         { status: 400 }
       );
     }
@@ -97,7 +114,7 @@ export async function POST(request: NextRequest) {
     try {
       // Use venv Python if available, otherwise fall back to system python3/python
       const pythonCmd = (() => {
-        const venvPython = path.join(projectRoot, "analytics/venv/bin/python3");
+        const venvPython = join(projectRoot, "analytics/venv/bin/python3");
         try {
           execSync(`"${venvPython}" --version`, { stdio: "pipe" });
           return `"${venvPython}"`;
@@ -130,26 +147,21 @@ export async function POST(request: NextRequest) {
         }
       );
     } catch (execError: any) {
-      const stderr = execError.stderr ?? "";
-      const message = execError.message ?? "Unknown execution error";
+      const stderr: string = execError.stderr ?? "";
+      const stdout: string = execError.stdout ?? "";
+      const message: string = execError.message ?? "Unknown execution error";
+      const detail = (stderr || stdout || message).slice(0, 2000);
 
-      // Check for common Python dependency errors
       if (stderr.includes("ModuleNotFoundError") || stderr.includes("ImportError")) {
         const missing = stderr.match(/No module named '([^']+)'/)?.[1] ?? "unknown";
         return NextResponse.json(
-          {
-            error: `Missing Python dependency: '${missing}'. Run: pip install -r analytics/requirements.txt`,
-            detail: stderr.slice(0, 800),
-          },
+          { error: `Missing Python dependency: '${missing}'. Run: pip install -r analytics/requirements.txt\n\n${detail}` },
           { status: 500 }
         );
       }
 
       return NextResponse.json(
-        {
-          error: "Python analysis script failed.",
-          detail: (stderr || message).slice(0, 1000),
-        },
+        { error: `Python analysis script failed:\n\n${detail}` },
         { status: 500 }
       );
     }
@@ -174,7 +186,7 @@ export async function POST(request: NextRequest) {
     }
 
     // ── Read the generated Excel file and base64-encode it ─────────────────
-    const excelPath = join(outputDir, "ocdl_judge_analytics.xlsx");
+    const excelPath = join(outputDir, "judgeiq_analytics.xlsx");
     let excelBase64 = "";
 
     if (existsSync(excelPath)) {
@@ -184,16 +196,16 @@ export async function POST(request: NextRequest) {
 
     // ── Build response ─────────────────────────────────────────────────────
     const response = {
+      format_info: analysisResult.format_info,
       summary: analysisResult.summary,
-      judge_stats: analysisResult.judge_stats,
-      kendall_tau_matrix: analysisResult.kendall_tau_matrix,
-      outliers: analysisResult.outliers,
+      division_stats: analysisResult.division_stats,
+      division_summary: analysisResult.division_summary,
       excel_base64: excelBase64,
     };
 
     return NextResponse.json(response, { status: 200 });
   } catch (err: any) {
-    console.error("[OCDL Analyze API] Unexpected error:", err);
+    console.error("[JudgeIQ Analyze API] Unexpected error:", err);
     return NextResponse.json(
       { error: err?.message ?? "An unexpected server error occurred." },
       { status: 500 }
@@ -216,7 +228,7 @@ export async function POST(request: NextRequest) {
 export async function GET() {
   return NextResponse.json({
     status: "ok",
-    service: "OCDL Judge Analytics API",
+    service: "JudgeIQ Judging Analytics API",
     version: "1.0.0",
     endpoints: {
       "POST /api/analyze": "Upload a JSON file (multipart/form-data, field: 'file') to run analysis",

@@ -5,10 +5,10 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "OCDL Judge Analytics",
+  title: "JudgeIQ - Judging Analytics for Competitive Debate",
   description:
-    "Online Competitive Dance League — Advanced judge scoring analytics platform for bias detection, consistency analysis, and Kendall's tau correlation.",
-  keywords: ["dance", "competition", "judge", "analytics", "OCDL", "scoring"],
+    "JudgeIQ — Intelligent judging analytics for competitive debate. Detect bias, score consistency, and surface outliers from any tournament data.",
+  keywords: ["debate", "competition", "judge", "analytics", "adjudication", "scoring"],
 };
 
 export default function RootLayout({
@@ -17,60 +17,88 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
-      <body className={`${inter.className} bg-gray-900 text-gray-100 antialiased`}>
+    <html lang="en">
+      <body
+        className={inter.className}
+        style={{ background: "#0F1B2D", color: "#FFFFFF", margin: 0, padding: 0, WebkitFontSmoothing: "antialiased" }}
+      >
         {/* Navigation */}
-        <nav className="border-b border-gray-800 bg-gray-900/80 backdrop-blur-sm sticky top-0 z-50">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex items-center justify-between h-16">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold text-sm">
-                  OC
-                </div>
-                <div>
-                  <span className="text-white font-bold text-lg tracking-tight">
-                    OCDL
-                  </span>
-                  <span className="text-indigo-400 font-medium text-lg ml-1">
-                    Analytics
-                  </span>
-                </div>
+        <nav
+          style={{
+            borderBottom: "1px solid #243550",
+            background: "rgba(15,27,45,0.85)",
+            backdropFilter: "blur(12px)",
+            position: "sticky",
+            top: 0,
+            zIndex: 50,
+          }}
+        >
+          <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 60 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 8,
+                  background: "#C9A84C",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "#0F1B2D",
+                  fontWeight: 800,
+                  fontSize: 16,
+                  letterSpacing: "-0.02em",
+                }}
+              >
+                J
               </div>
-              <div className="flex items-center gap-6 text-sm text-gray-400">
-                <a
-                  href="/"
-                  className="hover:text-white transition-colors font-medium"
-                >
-                  Home
-                </a>
-                <span className="text-gray-700">|</span>
-                <a
-                  href="https://github.com"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hover:text-white transition-colors"
-                >
-                  GitHub
-                </a>
-              </div>
+              <span style={{ color: "#FFFFFF", fontWeight: 800, fontSize: 18, letterSpacing: "-0.02em" }}>
+                Judge<span style={{ color: "#C9A84C" }}>IQ</span>
+              </span>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 24, fontSize: 14 }}>
+              <a
+                href="/"
+                style={{ color: "#8BA7C7", textDecoration: "none", fontWeight: 500, transition: "color 0.15s" }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = "#FFFFFF")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = "#8BA7C7")}
+              >
+                Home
+              </a>
+              <span style={{ color: "#243550" }}>|</span>
+              <a
+                href="https://github.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#8BA7C7", textDecoration: "none", transition: "color 0.15s" }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = "#FFFFFF")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = "#8BA7C7")}
+              >
+                GitHub
+              </a>
             </div>
           </div>
         </nav>
 
-        {/* Main content */}
         <main>{children}</main>
 
-        {/* Footer */}
-        <footer className="border-t border-gray-800 mt-24 py-10">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center text-gray-500 text-sm">
-            <p className="mb-1">
-              <span className="text-indigo-400 font-semibold">OCDL Judge Analytics</span>
-              {" "}— Online Competitive Dance League Scoring Intelligence
-            </p>
-            <p>
-              Built with Next.js 14, Python, Pandas, SciPy &amp; Recharts
-            </p>
-          </div>
+        <footer
+          style={{
+            borderTop: "1px solid #243550",
+            marginTop: 80,
+            padding: "36px 24px",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ color: "#4A6380", fontSize: 13, margin: 0 }}>
+            <span style={{ color: "#FFFFFF", fontWeight: 700 }}>Judge</span>
+            <span style={{ color: "#C9A84C", fontWeight: 700 }}>IQ</span>
+            {" "}— Intelligent judging analytics for competitive debate.
+          </p>
+          <p style={{ color: "#4A6380", fontSize: 12, marginTop: 6 }}>
+            Built with Next.js, Python, Pandas, SciPy &amp; Recharts
+          </p>
         </footer>
       </body>
     </html>
