@@ -164,9 +164,10 @@ function DivisionToggle({
   active: string;
   onChange: (div: string) => void;
 }) {
+  const options = divisions.length > 1 ? ["all", ...divisions] : divisions;
   return (
-    <div style={{ display: "flex", gap: 8, padding: "4px", background: C.navyCard, border: `1px solid ${C.navyBorder}`, borderRadius: 50, width: "fit-content" }}>
-      {divisions.map((div) => {
+    <div style={{ display: "flex", gap: 8, padding: "4px", background: C.navyCard, border: `1px solid ${C.navyBorder}`, borderRadius: 50, width: "fit-content", flexWrap: "wrap" }}>
+      {options.map((div) => {
         const isActive = div === active;
         return (
           <button
@@ -184,7 +185,7 @@ function DivisionToggle({
               color: isActive ? C.navy : C.textSecondary,
             }}
           >
-            {div}
+            {div === "all" ? "All Divisions" : div}
           </button>
         );
       })}
@@ -194,7 +195,9 @@ function DivisionToggle({
 
 // ─── Extreme Judge Cards ──────────────────────────────────────────────────────
 
-function ExtremeJudgeCards({ rows }: { rows: DivisionJudgeStat[] }) {
+type TaggedRow = DivisionJudgeStat & { _div?: string };
+
+function ExtremeJudgeCards({ rows }: { rows: TaggedRow[] }) {
   const top5 = [...rows]
     .sort((a, b) => b.Absolute_Severity - a.Absolute_Severity)
     .slice(0, 5);
@@ -207,7 +210,7 @@ function ExtremeJudgeCards({ rows }: { rows: DivisionJudgeStat[] }) {
         const bgColor = isHigh ? C.redDim : C.blueDim;
         return (
           <div
-            key={j.Judge_Full_Name}
+            key={`${j.Judge_Full_Name}-${j._div}`}
             style={{
               background: bgColor,
               border: `2px solid ${borderColor}`,
@@ -222,29 +225,24 @@ function ExtremeJudgeCards({ rows }: { rows: DivisionJudgeStat[] }) {
               overflow: "hidden",
             }}
           >
-            <span
-              style={{
-                position: "absolute",
-                top: 12,
-                right: 14,
-                fontSize: 11,
-                fontWeight: 700,
-                color: C.textMuted,
-              }}
-            >
+            <span style={{ position: "absolute", top: 12, right: 14, fontSize: 11, fontWeight: 700, color: C.textMuted }}>
               #{idx + 1}
             </span>
             <p style={{ color: C.textPrimary, fontWeight: 700, fontSize: 14, lineHeight: 1.3, paddingRight: 24 }}>
               {j.Judge_Full_Name}
             </p>
+            {j._div && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: C.gold, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                {j._div}
+              </span>
+            )}
             <p style={{ color: C.textSecondary, fontSize: 12 }}>
               Mean: <span style={{ color: C.textPrimary, fontWeight: 600, fontFamily: "monospace" }}>{j.Mean.toFixed(2)}</span>
             </p>
             <p style={{ color: C.textSecondary, fontSize: 12 }}>
               Z:{" "}
               <span style={{ color: isHigh ? C.red : C.blue, fontWeight: 700, fontFamily: "monospace" }}>
-                {j.Z_Severity_Index > 0 ? "+" : ""}
-                {j.Z_Severity_Index.toFixed(3)}
+                {j.Z_Severity_Index > 0 ? "+" : ""}{j.Z_Severity_Index.toFixed(3)}
               </span>
             </p>
             <span
@@ -739,7 +737,7 @@ export default function HomePage() {
       const data = await response.json();
       setResults(data);
       const divs = Object.keys(data.division_stats);
-      if (divs.length > 0) setActiveDivision(divs[0]);
+      setActiveDivision(divs.length === 1 ? divs[0] : "all");
     } catch (err: any) {
       setError(err.message || "Analysis failed. Please check your file format and try again.");
     } finally {
@@ -763,8 +761,22 @@ export default function HomePage() {
   }, [results]);
 
   const divisions = results ? Object.keys(results.division_stats) : [];
-  const activeRows = results?.division_stats[activeDivision] ?? [];
-  const activeSummary = results?.division_summary[activeDivision];
+  const isAll = activeDivision === "all";
+
+  // Per-division or all-divisions rows
+  const activeRows: TaggedRow[] = isAll
+    ? divisions.flatMap((div) => (results?.division_stats[div] ?? []).map((r) => ({ ...r, _div: div })))
+    : (results?.division_stats[activeDivision] ?? []);
+
+  const activeSummary = isAll ? null : results?.division_summary[activeDivision];
+
+  // Aggregated stats for "All Divisions" mode
+  const allModeTotals = isAll && results
+    ? {
+        total_judges: Object.values(results.division_summary).reduce((s, d) => s + d.total_judges, 0),
+        total_scores: Object.values(results.division_summary).reduce((s, d) => s + d.total_scores, 0),
+      }
+    : null;
 
   return (
     <div style={{ background: C.navy, minHeight: "100vh" }}>
@@ -1032,91 +1044,113 @@ export default function HomePage() {
           </div>
 
           {/* Division Toggle */}
-          {divisions.length > 1 && (
-            <div style={{ marginBottom: 28 }}>
-              <DivisionToggle
-                divisions={divisions}
-                active={activeDivision}
-                onChange={setActiveDivision}
-              />
-            </div>
-          )}
+          <div style={{ marginBottom: 28 }}>
+            <DivisionToggle
+              divisions={divisions}
+              active={activeDivision}
+              onChange={setActiveDivision}
+            />
+          </div>
 
-          {/* Division Summary Stats Bar */}
-          {activeSummary && (
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 28 }}>
-              <StatPill label="Division Mean" value={activeSummary.mean.toFixed(2)} />
-              <StatPill label="Std Deviation" value={activeSummary.std.toFixed(2)} accent={C.textSecondary} />
-              <StatPill label="Total Judges" value={activeSummary.total_judges} accent={C.blue} />
-              <StatPill label="Total Scores" value={activeSummary.total_scores} accent={C.textSecondary} />
-            </div>
-          )}
+          {/* Summary Stats Bar */}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 28 }}>
+            {isAll && allModeTotals ? (
+              <>
+                <StatPill label="Divisions" value={divisions.length} />
+                <StatPill label="Total Judges" value={allModeTotals.total_judges} accent={C.blue} />
+                <StatPill label="Total Scores" value={allModeTotals.total_scores} accent={C.textSecondary} />
+                <StatPill label="Total Competitors" value={results.summary.total_competitors} accent={C.textSecondary} />
+              </>
+            ) : activeSummary ? (
+              <>
+                <StatPill label="Division Mean" value={activeSummary.mean.toFixed(2)} />
+                <StatPill label="Std Deviation" value={activeSummary.std.toFixed(2)} accent={C.textSecondary} />
+                <StatPill label="Total Judges" value={activeSummary.total_judges} accent={C.blue} />
+                <StatPill label="Total Scores" value={activeSummary.total_scores} accent={C.textSecondary} />
+              </>
+            ) : null}
+          </div>
 
           {/* Top 5 Extreme Judge Cards */}
           {activeRows.length > 0 && (
             <div style={{ marginBottom: 28 }}>
-              <SectionHeader title="Most Extreme Judges" sub="Top 5 by absolute Z-severity — red border = High-Side, blue = Low-Side" />
+              <SectionHeader
+                title="Most Extreme Judges"
+                sub={isAll ? "Top 5 by absolute Z-severity across all divisions" : "Top 5 by absolute Z-severity — red border = High-Side, blue = Low-Side"}
+              />
               <ExtremeJudgeCards rows={activeRows} />
             </div>
           )}
 
           {/* Charts Row */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr",
-              gap: 16,
-              marginBottom: 28,
-            }}
-          >
-            <div className="charts-grid" style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(0, 1fr)", gap: 16 }}>
-              {/* Score Distribution */}
+          <div style={{ marginBottom: 28 }}>
+            {isAll ? (
+              /* All-divisions: full-width bias breakdown */
               <Card>
-                <SectionHeader
-                  title="Score Distribution"
-                  sub={`Bell curve for ${activeDivision} — dots show where each judge's mean falls`}
-                />
-                {activeSummary ? (
-                  <ScoreDistributionChart divStats={activeRows} divSummary={activeSummary} />
-                ) : (
-                  <p style={{ color: C.textMuted, textAlign: "center", padding: "60px 0" }}>No distribution data</p>
-                )}
-                <div style={{ display: "flex", gap: 20, marginTop: 12, flexWrap: "wrap" }}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.textMuted }}>
-                    <span style={{ width: 10, height: 10, borderRadius: "50%", background: C.red, display: "inline-block" }} />
-                    High-Side outlier
-                  </span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.textMuted }}>
-                    <span style={{ width: 10, height: 10, borderRadius: "50%", background: C.blue, display: "inline-block" }} />
-                    Low-Side outlier
-                  </span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.textMuted }}>
-                    <span style={{ width: 10, height: 10, borderRadius: "50%", background: C.textMuted, display: "inline-block" }} />
-                    Within normal range
-                  </span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.textMuted }}>
-                    <span style={{ width: 24, height: 2, background: C.gold, display: "inline-block" }} />
-                    Division mean (μ)
-                  </span>
-                </div>
-              </Card>
-
-              {/* Bias Breakdown */}
-              <Card>
-                <SectionHeader title="Bias Breakdown" sub="High-Side vs Low-Side judges by division" />
+                <SectionHeader title="Bias Breakdown — All Divisions" sub="High-Side vs Low-Side judges per division" />
                 <BiasBreakdownChart divisionStats={results.division_stats} />
               </Card>
-            </div>
+            ) : (
+              /* Single division: distribution + bias side by side */
+              <div className="charts-grid" style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(0, 1fr)", gap: 16 }}>
+                <Card>
+                  <SectionHeader
+                    title="Score Distribution"
+                    sub={`Bell curve for ${activeDivision} — dots show where each judge's mean falls`}
+                  />
+                  {activeSummary ? (
+                    <ScoreDistributionChart divStats={activeRows} divSummary={activeSummary} />
+                  ) : (
+                    <p style={{ color: C.textMuted, textAlign: "center", padding: "60px 0" }}>No distribution data</p>
+                  )}
+                  <div style={{ display: "flex", gap: 20, marginTop: 12, flexWrap: "wrap" }}>
+                    {[
+                      { color: C.red, label: "High-Side outlier" },
+                      { color: C.blue, label: "Low-Side outlier" },
+                      { color: C.textMuted, label: "Within normal range" },
+                    ].map(({ color, label }) => (
+                      <span key={label} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.textMuted }}>
+                        <span style={{ width: 10, height: 10, borderRadius: "50%", background: color, display: "inline-block" }} />
+                        {label}
+                      </span>
+                    ))}
+                    <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.textMuted }}>
+                      <span style={{ width: 24, height: 2, background: C.gold, display: "inline-block" }} />
+                      Division mean (μ)
+                    </span>
+                  </div>
+                </Card>
+                <Card>
+                  <SectionHeader title="Bias Breakdown" sub="High-Side vs Low-Side judges by division" />
+                  <BiasBreakdownChart divisionStats={results.division_stats} />
+                </Card>
+              </div>
+            )}
           </div>
 
-          {/* Severity Ranking Table */}
-          <Card>
-            <SectionHeader
-              title={`Severity Ranking — ${activeDivision}`}
-              sub="Click column headers to sort. Search by name to filter."
-            />
-            <SeverityRankingTable rows={activeRows} />
-          </Card>
+          {/* Severity Ranking Table(s) */}
+          {isAll ? (
+            /* All-divisions: one table per division, stacked */
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              {divisions.map((div) => (
+                <Card key={div}>
+                  <SectionHeader
+                    title={`Severity Ranking — ${div}`}
+                    sub="Click column headers to sort. Search by name to filter."
+                  />
+                  <SeverityRankingTable rows={results.division_stats[div] ?? []} />
+                </Card>
+              ))}
+            </div>
+          ) : (
+            <Card>
+              <SectionHeader
+                title={`Severity Ranking — ${activeDivision}`}
+                sub="Click column headers to sort. Search by name to filter."
+              />
+              <SeverityRankingTable rows={activeRows} />
+            </Card>
+          )}
 
         </section>
       )}
