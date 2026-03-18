@@ -132,3 +132,4 @@ judgeiq/
 - **Node.js** 18+
 - **Python** 3.8+
 - Python packages: `pandas`, `scipy`, `openpyxl`, `numpy`
+# judgeiq
