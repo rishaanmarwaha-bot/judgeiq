@@ -62,15 +62,6 @@ export default function Navbar() {
             <a href="/" className="nav-link">
               Home
             </a>
-            <span style={{ color: "#243550" }}>|</span>
-            <a
-              href="https://github.com/rishaanmarwaha-bot/judgeiq"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="nav-link"
-            >
-              GitHub
-            </a>
           </div>
         </div>
       </nav>
