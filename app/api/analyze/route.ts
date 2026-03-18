@@ -32,6 +32,7 @@ interface DivisionJudgeStat {
   Bias_Direction: "High-Side" | "Low-Side";
   Mann_Whitney_U: number | null;
   p_value: number | null;
+  mw_na_reason: string | null;
 }
 
 interface DivisionSummary {
@@ -94,10 +95,16 @@ function normalCDF(z: number): number {
 }
 
 /** Mann-Whitney U statistic + two-sided p-value via normal approximation */
-function mannWhitneyU(a: number[], b: number[]): { U: number; p: number } | null {
-  if (a.length < 3 || b.length < 3) return null;
-  // Skip if dataset is too large (O(n²))
-  if (a.length * b.length > 50_000) return null;
+function mannWhitneyU(
+  a: number[],
+  b: number[]
+): { U: number; p: number; reason: null } | { U: null; p: null; reason: string } {
+  if (a.length < 2)
+    return { U: null, p: null, reason: `judge has only ${a.length} score${a.length === 1 ? "" : "s"} (min 2 required)` };
+  if (b.length < 2)
+    return { U: null, p: null, reason: "comparison pool too small (min 2 required)" };
+  if (a.length * b.length > 50_000)
+    return { U: null, p: null, reason: "dataset too large for pairwise computation" };
 
   let U = 0;
   for (const x of a) {
@@ -111,11 +118,11 @@ function mannWhitneyU(a: number[], b: number[]): { U: number; p: number } | null
   const n2 = b.length;
   const muU = (n1 * n2) / 2;
   const sigmaU = Math.sqrt((n1 * n2 * (n1 + n2 + 1)) / 12);
-  if (sigmaU === 0) return null;
+  if (sigmaU === 0) return { U: null, p: null, reason: "all scores are identical (zero variance)" };
 
   const z = (U - muU) / sigmaU;
   const p = 2 * (1 - normalCDF(Math.abs(z)));
-  return { U: r(U, 1), p };
+  return { U: r(U, 1), p, reason: null };
 }
 
 function formatPValue(p: number | null): string {
@@ -426,8 +433,9 @@ function computeDivisionJudgeStats(
       Z_Severity_Index: r(zSeverity, 4),
       Absolute_Severity: r(absSeverity, 4),
       Bias_Direction: (zSeverity >= 0 ? "High-Side" : "Low-Side") as "High-Side" | "Low-Side",
-      Mann_Whitney_U: mw ? mw.U : null,
-      p_value: mw ? mw.p : null,
+      Mann_Whitney_U: mw.U,
+      p_value: mw.p,
+      mw_na_reason: mw.reason,
     };
   });
 
@@ -503,7 +511,7 @@ function buildSummary(
 const STAT_COLS: (keyof DivisionJudgeStat)[] = [
   "Severity_Rank", "Judge_ID", "Judge_Full_Name", "Number_of_Scores",
   "Mean", "Z_Severity_Index", "Absolute_Severity", "Bias_Direction",
-  "Mann_Whitney_U", "p_value",
+  "Mann_Whitney_U", "p_value", "mw_na_reason",
 ];
 
 function exportExcel(divisionStats: Record<string, DivisionJudgeStat[]>): Buffer {
@@ -523,7 +531,8 @@ function exportExcel(divisionStats: Record<string, DivisionJudgeStat[]>): Buffer
       STAT_COLS.map((col) => {
         const v = row[col];
         if (col === "p_value") return formatPValue(v as number | null);
-        if (col === "Mann_Whitney_U" && v === null) return "N/A";
+        if (col === "mw_na_reason") return v ? `N/A — ${v}` : "";
+        if (col === "Mann_Whitney_U" && v === null) return `N/A — ${row.mw_na_reason ?? "unknown"}`;
         if (v === null || v === undefined) return "N/A";
         return v;
       })

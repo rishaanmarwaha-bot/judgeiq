@@ -50,6 +50,7 @@ interface DivisionJudgeStat {
   Bias_Direction: "High-Side" | "Low-Side";
   Mann_Whitney_U: number | null;
   p_value: number | null;
+  mw_na_reason: string | null;
 }
 
 interface DivisionSummary {
@@ -615,10 +616,32 @@ function SeverityRankingTable({ rows }: { rows: DivisionJudgeStat[] }) {
                     </span>
                   </td>
                   <td style={{ padding: "11px 14px", fontFamily: "monospace", color: C.textSecondary }}>
-                    {row.Mann_Whitney_U !== null ? row.Mann_Whitney_U.toFixed(1) : "N/A"}
+                    {row.Mann_Whitney_U !== null ? (
+                      row.Mann_Whitney_U.toFixed(1)
+                    ) : (
+                      <span>
+                        <span style={{ color: C.textMuted }}>N/A</span>
+                        {row.mw_na_reason && (
+                          <span style={{ display: "block", fontSize: 10, color: C.textMuted, fontFamily: "sans-serif", marginTop: 2 }}>
+                            {row.mw_na_reason}
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </td>
                   <td style={{ padding: "11px 14px", fontFamily: "monospace", fontSize: 12, color: C.textSecondary }}>
-                    {formatPValue(row.p_value)}
+                    {row.p_value !== null ? (
+                      formatPValue(row.p_value)
+                    ) : (
+                      <span>
+                        <span style={{ color: C.textMuted }}>N/A</span>
+                        {row.mw_na_reason && (
+                          <span style={{ display: "block", fontSize: 10, color: C.textMuted, fontFamily: "sans-serif", marginTop: 2 }}>
+                            {row.mw_na_reason}
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </td>
                 </tr>
               );
