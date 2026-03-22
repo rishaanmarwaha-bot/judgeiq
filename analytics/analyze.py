@@ -101,8 +101,7 @@ def parse_tabroom_tournament(data: dict) -> tuple:
                         comp_id = str(ballot.get("entry_id") or "")
                         comp_name = comp_id
 
-                    # Speaker points: SUM all scores with tag "point"
-                    # (multiple speakers per team each get their own point score)
+                    # Speaker points: collect each individual score with tag "point"
                     point_scores = []
                     for s in (ballot.get("scores") or []):
                         if not isinstance(s, dict):
@@ -116,16 +115,16 @@ def parse_tabroom_tournament(data: dict) -> tuple:
                     # Skip ballots with no points or all-zero (bye proxy)
                     if not point_scores or all(v == 0 for v in point_scores):
                         continue
-                    score = sum(point_scores)
 
                     div_had_ballots = True
-                    ballot_records.append({
-                        "competitor_id": comp_id,
-                        "competitor_name": comp_name,
-                        "division": div_name,
-                        "judge_name": judge_name,
-                        "score": score,
-                    })
+                    for pt in point_scores:
+                        ballot_records.append({
+                            "competitor_id": comp_id,
+                            "competitor_name": comp_name,
+                            "division": div_name,
+                            "judge_name": judge_name,
+                            "score": pt,
+                        })
         if div_had_ballots and div_name not in divisions_seen:
             divisions_seen.append(div_name)
 
@@ -151,7 +150,7 @@ def _aggregate_ballot_records(ballot_records: list) -> list:
     result = []
     for comp_id, info in comp_info.items():
         judge_scores = {
-            jname: round(sum(sc) / len(sc), 2)
+            jname: sc
             for (cid, jname), sc in scores_by_comp_judge.items()
             if cid == comp_id
         }
@@ -323,7 +322,11 @@ def load_data(filepath: str) -> tuple:
 def extract_judge_names(data: list) -> list:
     names = set()
     for entry in data:
-        names.update(entry.get("judge_scores", {}).keys())
+        for j, scores in entry.get("judge_scores", {}).items():
+            if isinstance(scores, list) and scores:
+                names.add(j)
+            elif not isinstance(scores, list) and scores is not None:
+                names.add(j)
     return sorted(names)
 
 
@@ -355,21 +358,30 @@ STAT_COLUMNS = [
 
 
 def compute_division_judge_stats(
-    df_div: pd.DataFrame, judges: list, judge_id_map: dict
+    entries: list, judges: list, judge_id_map: dict
 ) -> pd.DataFrame:
     """
-    Compute per-judge stats for a single division's score matrix slice.
+    Compute per-judge stats for a single division's entries.
     Returns a DataFrame with STAT_COLUMNS, sorted by Severity_Rank ascending.
     """
-    valid_judges = [
-        j for j in judges
-        if j in df_div.columns and df_div[j].dropna().shape[0] > 0
-    ]
+    # Build per-judge score arrays by flattening individual speaker point scores
+    judge_scores_dict = {}
+    for j in judges:
+        scores = []
+        for e in entries:
+            js = e.get("judge_scores", {}).get(j)
+            if js is not None:
+                if isinstance(js, list):
+                    scores.extend(js)
+                else:
+                    scores.append(js)
+        if scores:
+            judge_scores_dict[j] = np.array(scores)
+
+    valid_judges = list(judge_scores_dict.keys())
     if len(valid_judges) < 2:
         return pd.DataFrame(columns=STAT_COLUMNS)
 
-    # Build per-judge score arrays and means
-    judge_scores_dict = {j: df_div[j].dropna().values for j in valid_judges}
     judge_means = {j: float(v.mean()) for j, v in judge_scores_dict.items()}
 
     means_arr = np.array(list(judge_means.values()))
@@ -424,12 +436,22 @@ def compute_division_judge_stats(
 # Division Summary Stats (for dashboard)
 # ---------------------------------------------------------------------------
 
-def compute_division_summary(df_div: pd.DataFrame, judges: list) -> dict:
+def compute_division_summary(entries: list, judges: list) -> dict:
     """Compute overall division-level stats for the dashboard."""
     all_scores = []
+    active_judges = []
     for j in judges:
-        if j in df_div.columns:
-            all_scores.extend(df_div[j].dropna().tolist())
+        scores = []
+        for e in entries:
+            js = e.get("judge_scores", {}).get(j)
+            if js is not None:
+                if isinstance(js, list):
+                    scores.extend(js)
+                else:
+                    scores.append(js)
+        if scores:
+            all_scores.extend(scores)
+            active_judges.append(j)
 
     if not all_scores:
         return {}
@@ -448,7 +470,6 @@ def compute_division_summary(df_div: pd.DataFrame, judges: list) -> dict:
             for i in range(len(counts))
         ]
 
-    active_judges = [j for j in judges if j in df_div.columns and df_div[j].notna().any()]
     return {
         "mean": round(mean, 3),
         "std": round(std, 3),
@@ -462,7 +483,7 @@ def compute_division_summary(df_div: pd.DataFrame, judges: list) -> dict:
 # Summary
 # ---------------------------------------------------------------------------
 
-def build_summary(df: pd.DataFrame, judges: list, division_stats: dict) -> dict:
+def build_summary(entries: list, judges: list, division_stats: dict) -> dict:
     # Flatten all division stats to find highlights
     all_rows = pd.concat(division_stats.values(), ignore_index=True) if division_stats else pd.DataFrame()
 
@@ -472,10 +493,12 @@ def build_summary(df: pd.DataFrame, judges: list, division_stats: dict) -> dict:
         row = all_rows.sort_values(col, ascending=ascending).iloc[0]
         return str(row["Judge_Full_Name"])
 
+    divisions = list({e.get("division", "") for e in entries if e.get("division")})
+
     return {
-        "total_competitors": int(len(df)),
-        "total_judges": int(len(judges)),
-        "divisions": list(df["division"].dropna().unique()),
+        "total_competitors": len(entries),
+        "total_judges": len(judges),
+        "divisions": divisions,
         "judge_names": judges,
         "most_generous_judge": pick("Z_Severity_Index", ascending=False),
         "most_strict_judge": pick("Z_Severity_Index", ascending=True),
@@ -604,22 +627,23 @@ def analyze(input_path: str, output_dir: str) -> dict:
     judge_id_map = format_info.get("judge_id_map", {})
 
     judges = extract_judge_names(data)
-    df = build_score_matrix(data, judges)
 
     # Per-division stats
-    divisions = list(df["division"].dropna().unique())
+    divisions = list({e.get("division", "") for e in data if e.get("division")})
     division_stats = {}
     division_stats_list = {}  # for JSON output
     division_summary = {}
     for div in divisions:
-        df_div = df[df["division"] == div].copy()
-        div_judges = [j for j in judges if j in df_div.columns and df_div[j].notna().any()]
-        div_df = compute_division_judge_stats(df_div, div_judges, judge_id_map)
+        div_entries = [e for e in data if e.get("division") == div]
+        div_judges = [j for j in judges if any(
+            e.get("judge_scores", {}).get(j) for e in div_entries
+        )]
+        div_df = compute_division_judge_stats(div_entries, div_judges, judge_id_map)
         division_stats[div] = div_df
         division_stats_list[div] = _df_to_list(div_df)
-        division_summary[div] = compute_division_summary(df_div, div_judges)
+        division_summary[div] = compute_division_summary(div_entries, div_judges)
 
-    summary = build_summary(df, judges, division_stats)
+    summary = build_summary(data, judges, division_stats)
 
     excel_path = os.path.join(output_dir, "judgeiq_analytics.xlsx")
     export_excel(division_stats, excel_path)

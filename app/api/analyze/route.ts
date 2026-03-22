@@ -18,7 +18,7 @@ interface Entry {
   competitor_id: string;
   competitor_name: string;
   division: string;
-  judge_scores: Record<string, number>;
+  judge_scores: Record<string, number[]>;
 }
 
 interface DivisionJudgeStat {
@@ -175,10 +175,10 @@ function aggregateBallots(records: BallotRecord[]): Entry[] {
   }
 
   return Object.entries(compInfo).map(([cid, info]) => {
-    const judge_scores: Record<string, number> = {};
+    const judge_scores: Record<string, number[]> = {};
     for (const [k, scores] of Object.entries(byCompJudge)) {
       const [c, j] = k.split("|||");
-      if (c === cid) judge_scores[j] = r(avg(scores), 2);
+      if (c === cid) judge_scores[j] = scores;
     }
     return { competitor_id: cid, competitor_name: info.name, division: info.division, judge_scores };
   });
@@ -255,13 +255,15 @@ function parseTournament(data: Record<string, unknown>): {
           if (pts.length === 0 || pts.every((v) => v === 0)) continue;
 
           divHad = true;
-          ballots.push({
-            competitor_id: compId,
-            competitor_name: compName,
-            division: divName,
-            judge_name: judgeName,
-            score: pts.reduce((a, b) => a + b, 0),
-          });
+          for (const pt of pts) {
+            ballots.push({
+              competitor_id: compId,
+              competitor_name: compName,
+              division: divName,
+              judge_name: judgeName,
+              score: pt,
+            });
+          }
         }
       }
     }
@@ -361,7 +363,15 @@ function loadData(json: unknown): {
     json.length > 0 &&
     json.every((d) => typeof d === "object" && d !== null && "judge_scores" in d)
   ) {
-    const entries = json as Entry[];
+    const entries = (json as Record<string, unknown>[]).map((d) => {
+      const js = (d as { judge_scores?: Record<string, unknown> }).judge_scores ?? {};
+      return {
+        ...d,
+        judge_scores: Object.fromEntries(
+          Object.entries(js).map(([k, v]) => [k, Array.isArray(v) ? v : [v]])
+        ),
+      } as Entry;
+    });
     const allJudges = new Set<string>();
     entries.forEach((e) => Object.keys(e.judge_scores ?? {}).forEach((j) => allJudges.add(j)));
     return {
@@ -394,12 +404,10 @@ function computeDivisionJudgeStats(
   judges: string[],
   judgeIdMap: Record<string, string>
 ): DivisionJudgeStat[] {
-  // Build per-judge score arrays
+  // Build per-judge score arrays (flatten individual speaker point scores)
   const judgeScores: Record<string, number[]> = {};
   for (const judge of judges) {
-    const scores = entries
-      .map((e) => e.judge_scores[judge])
-      .filter((v) => v != null) as number[];
+    const scores = entries.flatMap((e) => e.judge_scores[judge] ?? []);
     if (scores.length > 0) judgeScores[judge] = scores;
   }
 
@@ -448,9 +456,7 @@ function computeDivisionSummary(entries: Entry[], judges: string[]): DivisionSum
   const activeJudges: string[] = [];
 
   for (const judge of judges) {
-    const scores = entries
-      .map((e) => e.judge_scores[judge])
-      .filter((v) => v != null) as number[];
+    const scores = entries.flatMap((e) => e.judge_scores[judge] ?? []);
     if (scores.length > 0) {
       allScores.push(...scores);
       activeJudges.push(judge);
@@ -612,7 +618,7 @@ export async function POST(request: NextRequest) {
 
     for (const div of divisions) {
       const divEntries = entries.filter((e) => e.division === div);
-      const divJudges = judges.filter((j) => divEntries.some((e) => e.judge_scores[j] != null));
+      const divJudges = judges.filter((j) => divEntries.some((e) => (e.judge_scores[j]?.length ?? 0) > 0));
       divisionStats[div] = computeDivisionJudgeStats(divEntries, divJudges, judgeIdMap);
       divisionSummary[div] = computeDivisionSummary(divEntries, divJudges);
     }
