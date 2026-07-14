@@ -201,15 +201,29 @@ function parseTournament(data: Record<string, unknown>): {
     const { jmap: catJmap } = buildJudgeMap((c.judges as unknown[]) ?? []);
     const mergedJmap = { ...catJmap, ...topJmap }; // top-level takes precedence
 
-    // Collect rounds (via events wrapper or direct)
-    let rounds: unknown[] = [];
+    // Collect rounds, tagging each with its event name. Analytics group by
+    // EVENT (e.g. "Dramatic Interp", "Lincoln Douglas") rather than by the
+    // broad category (e.g. "Speech", "Debate"), because different events use
+    // different point scales (speech ~50-100, debate ~20-30, POI its own
+    // range). Pooling events with different scales makes judges on one scale
+    // look like severe outliers purely from the scale gap — a false bias
+    // signal. Comparing judges only within the same event fixes this.
+    const roundsWithEvent: { round: unknown; eventName: string }[] = [];
     for (const ev of (c.events as unknown[]) ?? []) {
-      rounds.push(...((ev as Record<string, unknown>).rounds as unknown[] ?? []));
+      const evObj = ev as Record<string, unknown>;
+      const evName = String(evObj.name ?? evObj.abbr ?? divName).trim();
+      for (const rnd of (evObj.rounds as unknown[]) ?? []) {
+        roundsWithEvent.push({ round: rnd, eventName: evName });
+      }
     }
-    if (rounds.length === 0) rounds = (c.rounds as unknown[]) ?? [];
+    if (roundsWithEvent.length === 0) {
+      for (const rnd of (c.rounds as unknown[]) ?? []) {
+        roundsWithEvent.push({ round: rnd, eventName: divName });
+      }
+    }
 
-    let divHad = false;
-    for (const rnd of rounds) {
+    const divsHad = new Set<string>();
+    for (const { round: rnd, eventName } of roundsWithEvent) {
       const sections = ((rnd as Record<string, unknown>).sections ??
         (rnd as Record<string, unknown>).panels ??
         []) as unknown[];
@@ -219,13 +233,17 @@ function parseTournament(data: Record<string, unknown>): {
           const b = ballot as Record<string, unknown>;
           if (b.bye || b.forfeit) continue;
 
-          // Judge lookup
+          // Judge lookup — fall back to the raw ID when no roster name exists.
+          // Some Tabroom exports (e.g. single-round exports) omit the judges
+          // roster entirely; the ballot then carries only a bare judge ID.
+          // Analytics key on this label, so "Judge 2751055" works fine as an
+          // identity when no name is available.
           const judgeId =
             typeof b.judge === "object" && b.judge !== null
               ? String((b.judge as Record<string, unknown>).id ?? "").trim()
               : String(b.judge ?? "").trim();
-          const judgeName = mergedJmap[judgeId];
-          if (!judgeName) continue;
+          if (!judgeId) continue; // no judge at all → unscoreable
+          const judgeName = mergedJmap[judgeId] ?? `Judge ${judgeId}`;
 
           // Competitor
           const compRaw = b.competitor ?? b.entry;
@@ -242,7 +260,7 @@ function parseTournament(data: Record<string, unknown>): {
             compName = compId;
           }
 
-          // Sum point scores
+          // Collect each speaker-point score as its own data point
           const pts: number[] = [];
           for (const s of (b.scores as unknown[]) ?? []) {
             if (typeof s !== "object" || s === null) continue;
@@ -254,12 +272,12 @@ function parseTournament(data: Record<string, unknown>): {
           }
           if (pts.length === 0 || pts.every((v) => v === 0)) continue;
 
-          divHad = true;
+          divsHad.add(eventName);
           for (const pt of pts) {
             ballots.push({
               competitor_id: compId,
               competitor_name: compName,
-              division: divName,
+              division: eventName,
               judge_name: judgeName,
               score: pt,
             });
@@ -267,7 +285,9 @@ function parseTournament(data: Record<string, unknown>): {
         }
       }
     }
-    if (divHad && !divsSeen.includes(divName)) divsSeen.push(divName);
+    for (const d of Array.from(divsHad)) {
+      if (!divsSeen.includes(d)) divsSeen.push(d);
+    }
   }
 
   const entries = aggregateBallots(ballots);
