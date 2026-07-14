@@ -73,6 +73,7 @@ interface FormatInfo {
   divisions?: string[];
   total_ballots?: number;
   entry_count?: number;
+  duplicate_ballots_skipped?: number;
 }
 
 // ─── Math helpers ─────────────────────────────────────────────────────────────
@@ -139,8 +140,24 @@ function mannWhitneyU(
 
   const n1 = a.length;
   const n2 = b.length;
+  const N = n1 + n2;
   const muU = (n1 * n2) / 2;
-  const sigmaU = Math.sqrt((n1 * n2 * (n1 + n2 + 1)) / 12);
+
+  // Tie correction: speaker points take few discrete values, so ties are
+  // pervasive. Without this correction sigma is overestimated and p-values
+  // come out too large (under-flagging). Standard correction:
+  //   sigma^2 = (n1*n2/12) * [ (N+1) - sum(t^3 - t) / (N*(N-1)) ]
+  // where t ranges over the sizes of each group of tied values in the
+  // combined sample.
+  const tieCounts = new Map<number, number>();
+  for (const v of a) tieCounts.set(v, (tieCounts.get(v) ?? 0) + 1);
+  for (const v of b) tieCounts.set(v, (tieCounts.get(v) ?? 0) + 1);
+  let tieSum = 0;
+  tieCounts.forEach((t) => {
+    if (t > 1) tieSum += t ** 3 - t;
+  });
+
+  const sigmaU = Math.sqrt(((n1 * n2) / 12) * (N + 1 - tieSum / (N * (N - 1))));
   if (sigmaU === 0) return { U: null, p: null, reason: "all scores are identical (zero variance)" };
 
   const z = (U - muU) / sigmaU;
@@ -207,14 +224,31 @@ function aggregateBallots(records: BallotRecord[]): Entry[] {
   });
 }
 
-function parseTournament(data: Record<string, unknown>): {
+function parseTournament(
+  data: Record<string, unknown>,
+  /**
+   * Ballot IDs already ingested in this upload. Tabroom ballot IDs are
+   * globally unique, so if a user uploads overlapping exports (e.g. the same
+   * round appearing in two files), we skip the repeat instead of
+   * double-counting its scores — which would silently skew every statistic.
+   */
+  seenBallots?: Set<string>
+): {
   entries: Entry[];
-  meta: { tournament_name: string; judge_count: number; divisions: string[]; total_ballots: number };
+  meta: {
+    tournament_name: string;
+    judge_count: number;
+    divisions: string[];
+    total_ballots: number;
+    duplicate_ballots_skipped: number;
+  };
   judgeIdMap: Record<string, string>;
 } {
   const { jmap: topJmap, jidMap } = buildJudgeMap((data.judges as unknown[]) ?? []);
   const ballots: BallotRecord[] = [];
   const divsSeen: string[] = [];
+  const seen = seenBallots ?? new Set<string>();
+  let duplicatesSkipped = 0;
 
   for (const cat of (data.categories as unknown[]) ?? []) {
     if (typeof cat !== "object" || cat === null) continue;
@@ -255,6 +289,16 @@ function parseTournament(data: Record<string, unknown>): {
         for (const ballot of ((sec as Record<string, unknown>).ballots as unknown[]) ?? []) {
           const b = ballot as Record<string, unknown>;
           if (b.bye || b.forfeit) continue;
+
+          // Deduplicate on ballot ID across all files in this upload
+          const ballotId = b.id != null ? String(b.id) : null;
+          if (ballotId) {
+            if (seen.has(ballotId)) {
+              duplicatesSkipped++;
+              continue;
+            }
+            seen.add(ballotId);
+          }
 
           // Judge lookup — fall back to the raw ID when no roster name exists.
           // Some Tabroom exports (e.g. single-round exports) omit the judges
@@ -324,6 +368,7 @@ function parseTournament(data: Record<string, unknown>): {
       judge_count: allJudges.size,
       divisions: divsSeen,
       total_ballots: ballots.length,
+      duplicate_ballots_skipped: duplicatesSkipped,
     },
     judgeIdMap: jidMap,
   };
@@ -363,12 +408,19 @@ function loadData(json: unknown): {
     const allDivisions: string[] = [];
     const allJudgeIdMap: Record<string, string> = {};
     let totalBallots = 0;
+    let totalDuplicates = 0;
     const names: string[] = [];
+    // One shared set across all files so overlapping exports dedupe correctly
+    const seenBallots = new Set<string>();
 
     for (const t of json) {
-      const { entries, meta, judgeIdMap } = parseTournament(t as Record<string, unknown>);
+      const { entries, meta, judgeIdMap } = parseTournament(
+        t as Record<string, unknown>,
+        seenBallots
+      );
       allEntries = allEntries.concat(entries);
       totalBallots += meta.total_ballots;
+      totalDuplicates += meta.duplicate_ballots_skipped;
       names.push(meta.tournament_name);
       Object.assign(allJudgeIdMap, judgeIdMap);
       for (const d of meta.divisions) {
@@ -384,18 +436,23 @@ function loadData(json: unknown): {
 
     const namesStr =
       names.slice(0, 3).join(", ") + (names.length > 3 ? ` (+${names.length - 3} more)` : "");
+    const dupNote =
+      totalDuplicates > 0
+        ? ` — ${totalDuplicates} duplicate ballot${totalDuplicates === 1 ? "" : "s"} skipped (overlapping files)`
+        : "";
 
     return {
       entries: allEntries,
       judgeIdMap: allJudgeIdMap,
       formatInfo: {
         format: "tabroom_multi",
-        label: `Multi-tournament Tabroom export: ${namesStr}`,
+        label: `Multi-tournament Tabroom export: ${namesStr}${dupNote}`,
         tournament_names: names,
         judge_count: allJudges.size,
         division_count: allDivisions.length,
         divisions: allDivisions,
         total_ballots: totalBallots,
+        duplicate_ballots_skipped: totalDuplicates,
       },
     };
   }

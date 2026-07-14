@@ -45,6 +45,8 @@ interface DivisionJudgeStat {
   Judge_Full_Name: string;
   Number_of_Scores: number;
   Mean: number;
+  Score_StdDev: number | null;
+  Consistency_Ratio: number | null;
   Z_Severity_Index: number;
   Absolute_Severity: number;
   Bias_Direction: "High-Side" | "Low-Side";
@@ -459,8 +461,14 @@ function SeverityRankingTable({ rows }: { rows: DivisionJudgeStat[] }) {
       );
     }
     r.sort((a, b) => {
-      const av = a[sortKey] ?? 0;
-      const bv = b[sortKey] ?? 0;
+      const av = a[sortKey];
+      const bv = b[sortKey];
+      // Nulls (insufficient data) always sort to the bottom, regardless of
+      // direction — otherwise a null Consistency_Ratio coerced to 0 would
+      // masquerade as the most consistent judge.
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
       if (av < bv) return sortDir === "asc" ? -1 : 1;
       if (av > bv) return sortDir === "asc" ? 1 : -1;
       return 0;
@@ -474,6 +482,8 @@ function SeverityRankingTable({ rows }: { rows: DivisionJudgeStat[] }) {
     { key: "Judge_Full_Name", label: "Judge Name" },
     { key: "Number_of_Scores", label: "# Scores" },
     { key: "Mean", label: "Mean" },
+    { key: "Score_StdDev", label: "Std Dev" },
+    { key: "Consistency_Ratio", label: "Consistency" },
     { key: "Z_Severity_Index", label: "Z-Index" },
     { key: "Absolute_Severity", label: "|Z|" },
     { key: "Bias_Direction", label: "Bias" },
@@ -550,7 +560,7 @@ function SeverityRankingTable({ rows }: { rows: DivisionJudgeStat[] }) {
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={10} style={{ textAlign: "center", padding: "32px", color: C.textMuted }}>
+                <td colSpan={12} style={{ textAlign: "center", padding: "32px", color: C.textMuted }}>
                   No judges match your search.
                 </td>
               </tr>
@@ -592,6 +602,31 @@ function SeverityRankingTable({ rows }: { rows: DivisionJudgeStat[] }) {
                   </td>
                   <td style={{ padding: "11px 14px", fontFamily: "monospace", color: C.textPrimary }}>
                     {row.Mean.toFixed(2)}
+                  </td>
+                  <td style={{ padding: "11px 14px", fontFamily: "monospace", color: C.textSecondary }}>
+                    {row.Score_StdDev !== null && row.Score_StdDev !== undefined
+                      ? row.Score_StdDev.toFixed(2)
+                      : "—"}
+                  </td>
+                  <td
+                    style={{
+                      padding: "11px 14px",
+                      fontFamily: "monospace",
+                      fontWeight: 600,
+                      color:
+                        row.Consistency_Ratio === null || row.Consistency_Ratio === undefined
+                          ? C.textMuted
+                          : row.Consistency_Ratio > 1.5
+                          ? C.red
+                          : row.Consistency_Ratio < 0.75
+                          ? C.green
+                          : C.textSecondary,
+                    }}
+                    title="Judge's own score spread relative to the event's spread. <1 = more consistent than typical, >1 = less."
+                  >
+                    {row.Consistency_Ratio !== null && row.Consistency_Ratio !== undefined
+                      ? `${row.Consistency_Ratio.toFixed(2)}×`
+                      : "—"}
                   </td>
                   <td style={{ padding: "11px 14px", fontFamily: "monospace", fontWeight: 700, color: isHigh ? C.red : C.blue }}>
                     {row.Z_Severity_Index > 0 ? "+" : ""}{row.Z_Severity_Index.toFixed(4)}
