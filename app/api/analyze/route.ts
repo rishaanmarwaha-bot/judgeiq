@@ -27,6 +27,15 @@ interface DivisionJudgeStat {
   Judge_Full_Name: string;
   Number_of_Scores: number;
   Mean: number;
+  /** Std-dev of this judge's own scores — spread/consistency within the event's scale */
+  Score_StdDev: number | null;
+  /**
+   * Judge's std-dev divided by the event's overall std-dev. Scale-free, so it
+   * can be compared across events with different point scales. <1 = more
+   * consistent than typical for the event, >1 = less. null when the judge has
+   * too few scores for a meaningful spread estimate.
+   */
+  Consistency_Ratio: number | null;
   Z_Severity_Index: number;
   Absolute_Severity: number;
   Bias_Direction: "High-Side" | "Low-Side";
@@ -95,14 +104,28 @@ function normalCDF(z: number): number {
 }
 
 /** Mann-Whitney U statistic + two-sided p-value via normal approximation */
+// The normal approximation to the U distribution is unreliable for small
+// samples; below ~8 observations per group the reported p-value can be badly
+// miscalibrated. Rather than print an authoritative-looking but shaky number,
+// we report N/A with a reason (surfaced via mw_na_reason in the output).
+const MW_MIN_SAMPLE = 8;
+
 function mannWhitneyU(
   a: number[],
   b: number[]
 ): { U: number; p: number; reason: null } | { U: null; p: null; reason: string } {
-  if (a.length < 2)
-    return { U: null, p: null, reason: `judge has only ${a.length} score${a.length === 1 ? "" : "s"} (min 2 required)` };
-  if (b.length < 2)
-    return { U: null, p: null, reason: "comparison pool too small (min 2 required)" };
+  if (a.length < MW_MIN_SAMPLE)
+    return {
+      U: null,
+      p: null,
+      reason: `judge has only ${a.length} score${a.length === 1 ? "" : "s"} (min ${MW_MIN_SAMPLE} required for a reliable p-value)`,
+    };
+  if (b.length < MW_MIN_SAMPLE)
+    return {
+      U: null,
+      p: null,
+      reason: `comparison pool too small (min ${MW_MIN_SAMPLE} required for a reliable p-value)`,
+    };
   if (a.length * b.length > 50_000)
     return { U: null, p: null, reason: "dataset too large for pairwise computation" };
 
@@ -439,11 +462,24 @@ function computeDivisionJudgeStats(
   const meanOfMeans = avg(meansArr);
   const stdOfMeans = stdDev(meansArr, 1);
 
+  // Pooled spread of ALL scores in this event — the denominator for the
+  // scale-free consistency ratio.
+  const pooledStd = stdDev(Object.values(judgeScores).flat(), 1);
+
+  // Minimum scores for a meaningful spread estimate; std-dev of 2 scores is
+  // just half their gap and says nothing about consistency.
+  const MIN_SCORES_FOR_CONSISTENCY = 3;
+
   const records = validJudges.map((judge) => {
     const scores = judgeScores[judge];
     const meanScore = judgeMeans[judge];
     const zSeverity = stdOfMeans > 0 ? (meanScore - meanOfMeans) / stdOfMeans : 0;
     const absSeverity = Math.abs(zSeverity);
+
+    const hasSpread = scores.length >= MIN_SCORES_FOR_CONSISTENCY;
+    const scoreStd = hasSpread ? stdDev(scores, 1) : null;
+    const consistencyRatio =
+      scoreStd !== null && pooledStd > 0 ? r(scoreStd / pooledStd, 4) : null;
 
     // Pool all other judges' scores for Mann-Whitney
     const otherScores: number[] = [];
@@ -458,6 +494,8 @@ function computeDivisionJudgeStats(
       Judge_Full_Name: judge,
       Number_of_Scores: scores.length,
       Mean: r(meanScore, 2),
+      Score_StdDev: scoreStd !== null ? r(scoreStd, 2) : null,
+      Consistency_Ratio: consistencyRatio,
       Z_Severity_Index: r(zSeverity, 4),
       Absolute_Severity: r(absSeverity, 4),
       Bias_Direction: (zSeverity >= 0 ? "High-Side" : "Low-Side") as "High-Side" | "Low-Side",
@@ -520,6 +558,17 @@ function buildSummary(
   const pick = (cmp: (a: DivisionJudgeStat, b: DivisionJudgeStat) => number): string | null =>
     allRows.length === 0 ? null : [...allRows].sort(cmp)[0].Judge_Full_Name;
 
+  // Consistency is ranked on Consistency_Ratio (judge spread relative to their
+  // event's spread — scale-free), NOT on Z-severity. A judge whose MEAN sits
+  // near the pool average can still be wildly inconsistent ballot-to-ballot;
+  // severity and consistency are different questions. Only judges with enough
+  // scores for a spread estimate are eligible.
+  const consistencyRows = allRows.filter((row) => row.Consistency_Ratio !== null);
+  const pickConsistency = (
+    cmp: (a: DivisionJudgeStat, b: DivisionJudgeStat) => number
+  ): string | null =>
+    consistencyRows.length === 0 ? null : [...consistencyRows].sort(cmp)[0].Judge_Full_Name;
+
   return {
     total_competitors: entries.length,
     total_judges: judges.length,
@@ -527,8 +576,12 @@ function buildSummary(
     judge_names: judges,
     most_generous_judge: pick((a, b) => b.Z_Severity_Index - a.Z_Severity_Index),
     most_strict_judge: pick((a, b) => a.Z_Severity_Index - b.Z_Severity_Index),
-    most_consistent_judge: pick((a, b) => a.Absolute_Severity - b.Absolute_Severity),
-    least_consistent_judge: pick((a, b) => b.Absolute_Severity - a.Absolute_Severity),
+    most_consistent_judge: pickConsistency(
+      (a, b) => a.Consistency_Ratio! - b.Consistency_Ratio!
+    ),
+    least_consistent_judge: pickConsistency(
+      (a, b) => b.Consistency_Ratio! - a.Consistency_Ratio!
+    ),
   };
 }
 
@@ -536,7 +589,8 @@ function buildSummary(
 
 const STAT_COLS: (keyof DivisionJudgeStat)[] = [
   "Severity_Rank", "Judge_ID", "Judge_Full_Name", "Number_of_Scores",
-  "Mean", "Z_Severity_Index", "Absolute_Severity", "Bias_Direction",
+  "Mean", "Score_StdDev", "Consistency_Ratio", "Z_Severity_Index",
+  "Absolute_Severity", "Bias_Direction",
   "Mann_Whitney_U", "p_value", "mw_na_reason",
 ];
 
