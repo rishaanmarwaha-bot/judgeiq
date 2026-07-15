@@ -327,20 +327,33 @@ function parseTournament(
             compName = compId;
           }
 
-          // Collect each speaker-point score as its own data point
+          // Collect each speaker-point score as its own data point.
+          // Most events score speakers under tag "point". Student Congress
+          // exports contain no "point" scores at all — each speech is scored
+          // under tag "speech" (competitors also receive an ordinal "rank").
+          // Fall back to the "speech" values when a ballot has no "point"
+          // scores, so Congress rounds are analyzed on their per-speech
+          // quality points. Rank is deliberately ignored: it is a forced
+          // ordering that is identical across judges by construction and so
+          // carries no judge-leniency signal.
           const pts: number[] = [];
+          const speechPts: number[] = [];
           for (const s of (b.scores as unknown[]) ?? []) {
             if (typeof s !== "object" || s === null) continue;
             const so = s as Record<string, unknown>;
             if (so.tag === "point") {
               const v = parseFloat(String(so.value));
               if (!isNaN(v)) pts.push(v);
+            } else if (so.tag === "speech") {
+              const v = parseFloat(String(so.value));
+              if (!isNaN(v)) speechPts.push(v);
             }
           }
-          if (pts.length === 0 || pts.every((v) => v === 0)) continue;
+          const finalPts = pts.length > 0 ? pts : speechPts;
+          if (finalPts.length === 0 || finalPts.every((v) => v === 0)) continue;
 
           divsHad.add(eventName);
-          for (const pt of pts) {
+          for (const pt of finalPts) {
             ballots.push({
               competitor_id: compId,
               competitor_name: compName,
@@ -384,7 +397,7 @@ function loadData(json: unknown): {
     const { entries, meta, judgeIdMap } = parseTournament(json as Record<string, unknown>);
     if (entries.length === 0) {
       throw new Error(
-        `Tabroom tournament detected but no scorable ballots found. Ensure rounds have speaker point scores (tag='point') that are not byes or forfeits.`
+        `Tabroom tournament detected but no scorable ballots found. Ensure rounds have speaker point scores (tag='point', or tag='speech' for Student Congress) that are not byes or forfeits.`
       );
     }
     return {
