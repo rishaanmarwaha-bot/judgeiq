@@ -41,7 +41,7 @@ export default function RootLayout({
             {" "}— Intelligent judging analytics for competitive debate.
           </p>
           <p style={{ color: "#4A6380", fontSize: 12, marginTop: 6 }}>
-            Built with Next.js, Python, Pandas, SciPy &amp; Recharts
+            Bias detection · Severity scoring · Tab-room recommendations · Built with Next.js, TypeScript &amp; Recharts
           </p>
         </footer>
       </body>

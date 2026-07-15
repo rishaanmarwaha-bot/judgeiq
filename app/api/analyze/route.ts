@@ -655,6 +655,193 @@ function buildSummary(
   };
 }
 
+// ─── Recommendations ──────────────────────────────────────────────────────────
+
+type SeverityLevel = "critical" | "high" | "moderate" | "watch" | "normal";
+
+interface RecommendedAction {
+  type: "normalization" | "placement" | "monitoring" | "feedback";
+  title: string;
+  detail: string;
+}
+
+interface JudgeRecommendation {
+  judge_name: string;
+  division: string;
+  severity_level: SeverityLevel;
+  /** Plain-English one-liner explaining WHY this judge is flagged */
+  headline: string;
+  small_sample: boolean;
+  statistically_significant: boolean;
+  /** Points to add to this judge's ballots to align their mean with the pool (negative = subtract) */
+  suggested_adjustment: number | null;
+  erratic: boolean;
+  actions: RecommendedAction[];
+  /** Courteous note tab staff can share with the judge; null when no action needed */
+  feedback_note: string | null;
+}
+
+const SEVERITY_ORDER: Record<SeverityLevel, number> = {
+  critical: 0,
+  high: 1,
+  moderate: 2,
+  watch: 3,
+  normal: 4,
+};
+
+/**
+ * Turn each judge's statistics into concrete guidance for tab staff.
+ *
+ * Severity tiers combine effect size (|Z| of the judge's mean vs the pool of
+ * judge means) with statistical evidence (tie-corrected Mann-Whitney p-value):
+ *   critical — |Z| ≥ 2.0 with p < 0.01, or |Z| ≥ 2.5 regardless of p
+ *   high     — |Z| ≥ 1.5 with p < 0.05, or |Z| ≥ 2.0
+ *   moderate — |Z| ≥ 1.0
+ *   watch    — |Z| ≥ 0.5 with p < 0.05, or an erratic spread (consistency ≥ 1.5×)
+ *   normal   — everything else
+ *
+ * Judges with < 8 scores are marked small_sample: their tier is real but the
+ * evidence is thin, so every action carries a "provisional" caveat rather
+ * than pretending the small n doesn't matter.
+ */
+function buildRecommendations(
+  divisionStats: Record<string, DivisionJudgeStat[]>,
+  divisionSummary: Record<string, DivisionSummary>
+): Record<string, JudgeRecommendation[]> {
+  const out: Record<string, JudgeRecommendation[]> = {};
+
+  for (const [division, rows] of Object.entries(divisionStats)) {
+    const divMean = divisionSummary[division]?.mean ?? 0;
+    const recs: JudgeRecommendation[] = rows.map((row) => {
+      const absZ = row.Absolute_Severity;
+      const z = row.Z_Severity_Index;
+      const p = row.p_value;
+      const n = row.Number_of_Scores;
+      const cr = row.Consistency_Ratio;
+      const isHigh = row.Bias_Direction === "High-Side";
+
+      const sig = p !== null && p < 0.05;
+      const strongSig = p !== null && p < 0.01;
+      const erratic = cr !== null && cr >= 1.5;
+      const smallSample = n < MW_MIN_SAMPLE;
+
+      let level: SeverityLevel = "normal";
+      if ((absZ >= 2.0 && strongSig) || absZ >= 2.5) level = "critical";
+      else if ((absZ >= 1.5 && sig) || absZ >= 2.0) level = "high";
+      else if (absZ >= 1.0) level = "moderate";
+      else if ((absZ >= 0.5 && sig) || erratic) level = "watch";
+
+      const diff = r(divMean - row.Mean, 2); // adjustment to align with pool
+      const gapAbs = Math.abs(r(row.Mean - divMean, 2));
+      const dirWord = isHigh ? "above" : "below";
+      const tendency = isHigh ? "generous" : "strict";
+
+      const evidence =
+        p !== null
+          ? `p = ${formatPValue(p)}${sig ? " — statistically significant" : " — not statistically significant"}`
+          : `p-value unavailable (${row.mw_na_reason ?? "insufficient data"})`;
+
+      let headline: string;
+      if (level === "normal") {
+        headline = erratic
+          ? `Scoring average is in line with the pool, but ballot-to-ballot spread is ${cr!.toFixed(2)}× the event norm.`
+          : `Scoring in line with the ${division} pool (mean ${row.Mean.toFixed(2)}, Z = ${z >= 0 ? "+" : ""}${z.toFixed(2)}). No action needed.`;
+      } else if (level === "watch" && absZ < 0.5 && erratic) {
+        headline = `Mean is close to the ${division} pool (Z = ${z >= 0 ? "+" : ""}${z.toFixed(2)}), but ballot-to-ballot spread is ${cr!.toFixed(2)}× the event norm — inconsistent standards more than directional bias.${smallSample ? ` Based on only ${n} score${n === 1 ? "" : "s"} — treat as provisional.` : ""}`;
+      } else {
+        headline = `Averages ${gapAbs.toFixed(2)} pts ${dirWord} the ${division} pool mean of ${divMean.toFixed(2)} (Z = ${z >= 0 ? "+" : ""}${z.toFixed(2)}, ${evidence}).${smallSample ? ` Based on only ${n} score${n === 1 ? "" : "s"} — treat as provisional.` : ""}`;
+      }
+
+      const actions: RecommendedAction[] = [];
+      let feedbackNote: string | null = null;
+
+      if (level !== "normal") {
+        // 1 — Monitoring / flagging (always first: understand before acting)
+        actions.push({
+          type: "monitoring",
+          title:
+            level === "watch"
+              ? "Keep on the watch list"
+              : `Flag for tab-room review (${level} severity)`,
+          detail:
+            level === "watch"
+              ? `Early signal only. Re-run this analysis after the next round${erratic ? ` — the ${cr!.toFixed(2)}× spread suggests inconsistent standards more than directional bias` : ""}. No intervention warranted yet.`
+              : `This judge scores measurably ${tendency}er than the pool. ${sig ? "The pattern is statistically significant, so it is unlikely to be luck of the draw." : "The evidence is suggestive but not yet statistically significant — verify against the next rounds before intervening."}${smallSample ? ` Only ${n} scores so far; collect more before firm conclusions.` : ""}`,
+        });
+
+        // 2 — Score normalization (only when the direction is meaningful)
+        if (absZ >= 1.0) {
+          actions.push({
+            type: "normalization",
+            title: `Normalize ballots: apply ${diff >= 0 ? "+" : ""}${diff.toFixed(2)} pts`,
+            detail: `Before computing speaker awards, add ${diff >= 0 ? "+" : ""}${diff.toFixed(2)} to each of this judge's scores to align their mean (${row.Mean.toFixed(2)}) with the division mean (${divMean.toFixed(2)}). For a spread-aware correction, z-normalize instead: adjusted = (score − ${row.Mean.toFixed(2)}) ÷ ${row.Score_StdDev !== null ? row.Score_StdDev.toFixed(2) : "judge σ"} × division σ + ${divMean.toFixed(2)}.${smallSample ? " Provisional — recompute as more ballots come in." : ""}`,
+          });
+        }
+
+        // 3 — Placement guidance
+        if (level === "critical") {
+          actions.push({
+            type: "placement",
+            title: "Restrict round placement",
+            detail: `Keep this judge off bubble rounds and out of single-judge elimination rounds — one ${tendency} ballot can decide who advances. If they must judge, place them only on panels of 3+ where the skew is diluted, ideally opposite a ${isHigh ? "low" : "high"}-side judge.`,
+          });
+        } else if (level === "high") {
+          actions.push({
+            type: "placement",
+            title: "Prefer panel assignments",
+            detail: `Avoid solo assignments in rounds where a single ballot determines advancement (bubbles, run-offs). Panels are fine; pairing with a ${isHigh ? "low" : "high"}-side judge naturally offsets the skew.`,
+          });
+        } else if (level === "moderate") {
+          actions.push({
+            type: "placement",
+            title: "Safe with light caution",
+            detail: `Fine for regular rounds. In high-stakes rounds decided by speaker points, prefer placing this judge on a panel rather than solo.`,
+          });
+        }
+
+        // 4 — Judge feedback note (only when the pattern is established)
+        if (level === "critical" || level === "high" || (level === "moderate" && sig)) {
+          feedbackNote = `Hi ${row.Judge_Full_Name}, thank you for judging ${division} with us. A routine review of scoring data shows your average speaker points (${row.Mean.toFixed(2)}) run about ${gapAbs.toFixed(1)} points ${dirWord} the event average (${divMean.toFixed(2)}). No individual result is being questioned — this is only about keeping points comparable across judges so every competitor is scored on the same scale. In upcoming rounds, it would help to anchor your scores closer to the event's typical range. Thanks again for your time and care.`;
+          actions.push({
+            type: "feedback",
+            title: "Share a calibration note with the judge",
+            detail:
+              "A ready-to-send note is included below. It frames the pattern as a calibration issue, not an accusation — most scoring skew is an anchoring habit, not intent.",
+          });
+        }
+      } else if (erratic) {
+        actions.push({
+          type: "monitoring",
+          title: "Watch ballot-to-ballot consistency",
+          detail: `Mean is fine but the score spread is ${cr!.toFixed(2)}× the event norm — this judge's points swing more than typical, which adds noise to speaker awards. Worth a second look after more rounds.`,
+        });
+      }
+
+      return {
+        judge_name: row.Judge_Full_Name,
+        division,
+        severity_level: level,
+        headline,
+        small_sample: smallSample,
+        statistically_significant: sig,
+        suggested_adjustment: level !== "normal" && absZ >= 1.0 ? diff : null,
+        erratic,
+        actions,
+        feedback_note: feedbackNote,
+      };
+    });
+
+    recs.sort(
+      (a, b) =>
+        SEVERITY_ORDER[a.severity_level] - SEVERITY_ORDER[b.severity_level] ||
+        Math.abs(b.suggested_adjustment ?? 0) - Math.abs(a.suggested_adjustment ?? 0)
+    );
+    out[division] = recs;
+  }
+
+  return out;
+}
+
 // ─── Excel Export ─────────────────────────────────────────────────────────────
 
 const STAT_COLS: (keyof DivisionJudgeStat)[] = [
@@ -664,8 +851,37 @@ const STAT_COLS: (keyof DivisionJudgeStat)[] = [
   "Mann_Whitney_U", "p_value", "mw_na_reason",
 ];
 
-function exportExcel(divisionStats: Record<string, DivisionJudgeStat[]>): Buffer {
+function exportExcel(
+  divisionStats: Record<string, DivisionJudgeStat[]>,
+  recommendations: Record<string, JudgeRecommendation[]>
+): Buffer {
   const wb = XLSX.utils.book_new();
+
+  // Recommendations sheet first — it's the "what do I do about it" summary
+  const recRows: (string | number)[][] = [
+    ["Division", "Judge", "Severity", "Why Flagged", "Suggested Adjustment", "Recommended Actions", "Feedback Note"],
+  ];
+  for (const recs of Object.values(recommendations)) {
+    for (const rec of recs) {
+      if (rec.severity_level === "normal" && rec.actions.length === 0) continue;
+      recRows.push([
+        rec.division,
+        rec.judge_name,
+        rec.severity_level.toUpperCase(),
+        rec.headline,
+        rec.suggested_adjustment !== null
+          ? `${rec.suggested_adjustment >= 0 ? "+" : ""}${rec.suggested_adjustment.toFixed(2)} pts`
+          : "—",
+        rec.actions.map((a) => `• ${a.title}: ${a.detail}`).join("\n"),
+        rec.feedback_note ?? "",
+      ]);
+    }
+  }
+  if (recRows.length > 1) {
+    const wsRec = XLSX.utils.aoa_to_sheet(recRows);
+    wsRec["!cols"] = [{ wch: 18 }, { wch: 24 }, { wch: 10 }, { wch: 60 }, { wch: 14 }, { wch: 80 }, { wch: 80 }];
+    XLSX.utils.book_append_sheet(wb, wsRec, "Recommendations");
+  }
 
   for (const [divName, rows] of Object.entries(divisionStats)) {
     const sheetName = divName.slice(0, 31);
@@ -768,13 +984,15 @@ export async function POST(request: NextRequest) {
     }
 
     const summary = buildSummary(entries, judges, divisionStats);
-    const excelBase64 = exportExcel(divisionStats).toString("base64");
+    const recommendations = buildRecommendations(divisionStats, divisionSummary);
+    const excelBase64 = exportExcel(divisionStats, recommendations).toString("base64");
 
     return NextResponse.json({
       format_info: formatInfo,
       summary,
       division_stats: divisionStats,
       division_summary: divisionSummary,
+      recommendations,
       excel_base64: excelBase64,
     });
   } catch (err: unknown) {
@@ -791,7 +1009,7 @@ export async function GET() {
   return NextResponse.json({
     status: "ok",
     service: "JudgeIQ Judging Analytics API",
-    version: "2.0.0",
+    version: "2.1.0",
     engine: "TypeScript (no Python dependency)",
   });
 }

@@ -86,11 +86,33 @@ interface FormatInfo {
   entry_count?: number;
 }
 
+type SeverityLevel = "critical" | "high" | "moderate" | "watch" | "normal";
+
+interface RecommendedAction {
+  type: "normalization" | "placement" | "monitoring" | "feedback";
+  title: string;
+  detail: string;
+}
+
+interface JudgeRecommendation {
+  judge_name: string;
+  division: string;
+  severity_level: SeverityLevel;
+  headline: string;
+  small_sample: boolean;
+  statistically_significant: boolean;
+  suggested_adjustment: number | null;
+  erratic: boolean;
+  actions: RecommendedAction[];
+  feedback_note: string | null;
+}
+
 interface AnalysisResult {
   format_info: FormatInfo;
   summary: Summary;
   division_stats: Record<string, DivisionJudgeStat[]>;
   division_summary: Record<string, DivisionSummary>;
+  recommendations?: Record<string, JudgeRecommendation[]>;
   excel_base64: string;
 }
 
@@ -265,6 +287,345 @@ function ExtremeJudgeCards({ rows }: { rows: TaggedRow[] }) {
         );
       })}
     </div>
+  );
+}
+
+// ─── Recommendations Panel ────────────────────────────────────────────────────
+
+const SEV_META: Record<SeverityLevel, { label: string; color: string; dim: string }> = {
+  critical: { label: "Critical", color: "#E8524A", dim: "rgba(232,82,74,0.12)" },
+  high: { label: "High", color: "#F0842C", dim: "rgba(240,132,44,0.12)" },
+  moderate: { label: "Moderate", color: "#F5C842", dim: "rgba(245,200,66,0.10)" },
+  watch: { label: "Watch", color: "#4A8FE8", dim: "rgba(74,143,232,0.12)" },
+  normal: { label: "Cleared", color: "#4AE88A", dim: "rgba(74,232,138,0.08)" },
+};
+
+const ACTION_META: Record<RecommendedAction["type"], { icon: string; label: string }> = {
+  monitoring: { icon: "👁", label: "Monitoring" },
+  normalization: { icon: "🎚", label: "Score Normalization" },
+  placement: { icon: "🧭", label: "Round Placement" },
+  feedback: { icon: "✉️", label: "Judge Feedback" },
+};
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1800);
+        } catch {
+          /* clipboard unavailable */
+        }
+      }}
+      style={{
+        background: copied ? "rgba(74,232,138,0.15)" : "rgba(255,255,255,0.06)",
+        border: `1px solid ${copied ? "rgba(74,232,138,0.4)" : C.navyBorder}`,
+        color: copied ? C.green : C.textSecondary,
+        borderRadius: 8,
+        padding: "6px 14px",
+        fontSize: 12,
+        fontWeight: 700,
+        cursor: "pointer",
+        transition: "all 0.15s",
+        flexShrink: 0,
+      }}
+    >
+      {copied ? "Copied ✓" : "Copy note"}
+    </button>
+  );
+}
+
+function RecommendationCard({ rec, showDivision }: { rec: JudgeRecommendation; showDivision: boolean }) {
+  const [expanded, setExpanded] = useState(rec.severity_level === "critical");
+  const meta = SEV_META[rec.severity_level];
+
+  return (
+    <div
+      style={{
+        background: C.navyCard,
+        border: `1px solid ${C.navyBorder}`,
+        borderLeft: `4px solid ${meta.color}`,
+        borderRadius: 12,
+        padding: "16px 20px",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span
+          style={{
+            background: meta.dim,
+            color: meta.color,
+            border: `1px solid ${meta.color}44`,
+            borderRadius: 20,
+            padding: "3px 12px",
+            fontSize: 11,
+            fontWeight: 800,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+          }}
+        >
+          {meta.label}
+        </span>
+        <span style={{ color: C.textPrimary, fontWeight: 700, fontSize: 15 }}>{rec.judge_name}</span>
+        {showDivision && (
+          <span style={{ color: C.gold, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            {rec.division}
+          </span>
+        )}
+        {rec.small_sample && (
+          <span style={{ color: C.textMuted, fontSize: 11, fontStyle: "italic" }}>small sample — provisional</span>
+        )}
+        {rec.suggested_adjustment !== null && (
+          <span
+            style={{
+              marginLeft: "auto",
+              fontFamily: "monospace",
+              fontWeight: 700,
+              fontSize: 13,
+              color: rec.suggested_adjustment >= 0 ? C.green : C.red,
+            }}
+            title="Suggested per-ballot adjustment to align this judge with the division mean"
+          >
+            {rec.suggested_adjustment >= 0 ? "+" : ""}
+            {rec.suggested_adjustment.toFixed(2)} pts
+          </span>
+        )}
+      </div>
+
+      <p style={{ color: C.textSecondary, fontSize: 13, lineHeight: 1.55, margin: "10px 0 0" }}>{rec.headline}</p>
+
+      {rec.actions.length > 0 && (
+        <>
+          <button
+            onClick={() => setExpanded((e) => !e)}
+            style={{
+              background: "none",
+              border: "none",
+              color: C.gold,
+              fontSize: 12.5,
+              fontWeight: 700,
+              cursor: "pointer",
+              padding: 0,
+              marginTop: 12,
+            }}
+          >
+            {expanded ? "▾ Hide" : "▸ Show"} recommended actions ({rec.actions.length})
+          </button>
+
+          {expanded && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 12 }}>
+              {rec.actions.map((a, i) => (
+                <div
+                  key={i}
+                  style={{
+                    background: "rgba(15,27,45,0.55)",
+                    border: `1px solid ${C.navyBorder}`,
+                    borderRadius: 10,
+                    padding: "12px 16px",
+                  }}
+                >
+                  <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.textPrimary }}>
+                    <span style={{ marginRight: 8 }}>{ACTION_META[a.type].icon}</span>
+                    <span style={{ color: C.textMuted, fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.07em", marginRight: 8 }}>
+                      {ACTION_META[a.type].label}
+                    </span>
+                    {a.title}
+                  </p>
+                  <p style={{ margin: "6px 0 0", fontSize: 12.5, lineHeight: 1.55, color: C.textSecondary }}>{a.detail}</p>
+                </div>
+              ))}
+
+              {rec.feedback_note && (
+                <div
+                  style={{
+                    background: "rgba(201,168,76,0.06)",
+                    border: `1px dashed rgba(201,168,76,0.4)`,
+                    borderRadius: 10,
+                    padding: "12px 16px",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
+                    <span style={{ color: C.gold, fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.07em" }}>
+                      Ready-to-send feedback note
+                    </span>
+                    <CopyButton text={rec.feedback_note} />
+                  </div>
+                  <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: C.textSecondary, fontStyle: "italic" }}>
+                    “{rec.feedback_note}”
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function RecommendationsPanel({ recs, showDivision }: { recs: JudgeRecommendation[]; showDivision: boolean }) {
+  const [filter, setFilter] = useState<SeverityLevel | "flagged">("flagged");
+
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { critical: 0, high: 0, moderate: 0, watch: 0, normal: 0 };
+    recs.forEach((r) => c[r.severity_level]++);
+    return c;
+  }, [recs]);
+
+  const flaggedCount = recs.length - counts.normal;
+
+  const visible = useMemo(() => {
+    if (filter === "flagged") return recs.filter((r) => r.severity_level !== "normal");
+    return recs.filter((r) => r.severity_level === filter);
+  }, [recs, filter]);
+
+  const chips: { key: SeverityLevel | "flagged"; label: string; count: number; color?: string }[] = [
+    { key: "flagged", label: "All Flagged", count: flaggedCount },
+    ...(Object.keys(SEV_META) as SeverityLevel[]).map((k) => ({
+      key: k,
+      label: SEV_META[k].label,
+      count: counts[k],
+      color: SEV_META[k].color,
+    })),
+  ];
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+        {chips.map(({ key, label, count, color }) => {
+          const active = filter === key;
+          return (
+            <button
+              key={key}
+              onClick={() => setFilter(key)}
+              disabled={count === 0}
+              style={{
+                padding: "7px 16px",
+                borderRadius: 50,
+                border: `1px solid ${active ? color ?? C.gold : C.navyBorder}`,
+                background: active ? (color ? `${color}22` : C.goldDim) : "transparent",
+                color: count === 0 ? C.textMuted : active ? color ?? C.gold : C.textSecondary,
+                fontWeight: 700,
+                fontSize: 12.5,
+                cursor: count === 0 ? "default" : "pointer",
+                opacity: count === 0 ? 0.45 : 1,
+                transition: "all 0.15s",
+              }}
+            >
+              {label} <span style={{ opacity: 0.7 }}>({count})</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {flaggedCount === 0 && filter === "flagged" ? (
+        <div
+          style={{
+            background: "rgba(74,232,138,0.05)",
+            border: `1px solid rgba(74,232,138,0.25)`,
+            borderRadius: 12,
+            padding: "28px 24px",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ color: C.green, fontWeight: 700, fontSize: 15, margin: 0 }}>✓ No judges flagged</p>
+          <p style={{ color: C.textMuted, fontSize: 13, marginTop: 6 }}>
+            Every judge is scoring within the normal range for this pool. No interventions recommended.
+          </p>
+        </div>
+      ) : visible.length === 0 ? (
+        <p style={{ color: C.textMuted, fontSize: 13, textAlign: "center", padding: "24px 0" }}>
+          No judges at this severity level.
+        </p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {visible.map((rec) => (
+            <RecommendationCard key={`${rec.division}-${rec.judge_name}`} rec={rec} showDivision={showDivision} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Judge Severity Chart (diverging Z bars) ──────────────────────────────────
+
+const ZBarTooltip = ({ active, payload }: any) => {
+  if (active && payload && payload.length) {
+    const p = payload[0]?.payload;
+    return (
+      <div style={{ background: C.navyCard, border: `1px solid ${C.navyBorder}`, borderRadius: 10, padding: "10px 14px" }}>
+        <p style={{ color: C.textPrimary, fontWeight: 700, fontSize: 13 }}>{p.name}</p>
+        <p style={{ color: C.textSecondary, fontSize: 12 }}>
+          Z: <span style={{ fontWeight: 700, fontFamily: "monospace", color: p.z >= 0 ? C.red : C.blue }}>{(p.z > 0 ? "+" : "") + p.z.toFixed(3)}</span>
+        </p>
+        <p style={{ color: C.textSecondary, fontSize: 12 }}>Mean: <span style={{ fontFamily: "monospace" }}>{p.mean.toFixed(2)}</span> · {p.n} scores</p>
+      </div>
+    );
+  }
+  return null;
+};
+
+function JudgeSeverityChart({ rows }: { rows: DivisionJudgeStat[] }) {
+  const data = useMemo(
+    () =>
+      [...rows]
+        .sort((a, b) => b.Z_Severity_Index - a.Z_Severity_Index)
+        .map((j) => ({
+          name: j.Judge_Full_Name,
+          z: j.Z_Severity_Index,
+          mean: j.Mean,
+          n: j.Number_of_Scores,
+          abs: j.Absolute_Severity,
+        })),
+    [rows]
+  );
+
+  const maxAbs = Math.max(1.8, ...data.map((d) => Math.abs(d.z))) * 1.15;
+  const height = Math.max(180, data.length * 30 + 60);
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={data} layout="vertical" margin={{ top: 10, right: 30, bottom: 10, left: 10 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke={C.navyBorder} horizontal={false} />
+        <XAxis
+          type="number"
+          domain={[-maxAbs, maxAbs]}
+          tick={{ fill: C.textMuted, fontSize: 10 }}
+          tickFormatter={(v) => v.toFixed(1)}
+          axisLine={false}
+          tickLine={false}
+        />
+        <YAxis
+          type="category"
+          dataKey="name"
+          width={150}
+          tick={{ fill: C.textSecondary, fontSize: 11 }}
+          axisLine={false}
+          tickLine={false}
+        />
+        <Tooltip content={<ZBarTooltip />} cursor={{ fill: "rgba(255,255,255,0.03)" }} />
+        <ReferenceLine x={0} stroke={C.textMuted} strokeWidth={1.5} />
+        <ReferenceLine x={1.5} stroke={C.red} strokeDasharray="5 4" strokeOpacity={0.5} />
+        <ReferenceLine x={-1.5} stroke={C.blue} strokeDasharray="5 4" strokeOpacity={0.5} />
+        <Bar dataKey="z" radius={[0, 5, 5, 0]} maxBarSize={18} isAnimationActive>
+          {data.map((d, i) => (
+            <Cell
+              key={i}
+              fill={
+                d.abs > 1.5
+                  ? d.z >= 0 ? C.red : C.blue
+                  : d.abs > 1.0
+                  ? d.z >= 0 ? "#F87171" : "#60A5FA"
+                  : "#4A6380"
+              }
+            />
+          ))}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
   );
 }
 
@@ -719,7 +1080,7 @@ function Card({ children, style }: { children: React.ReactNode; style?: React.CS
 
 export default function HomePage() {
   const [isDragging, setIsDragging] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<AnalysisResult | null>(null);
@@ -739,31 +1100,52 @@ export default function HomePage() {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file && file.name.endsWith(".json")) {
-      setSelectedFile(file);
+    const files = Array.from(e.dataTransfer.files).filter((f) => f.name.endsWith(".json"));
+    if (files.length > 0) {
+      setSelectedFiles(files);
       setError(null);
     } else {
-      setError("Please upload a valid JSON file.");
+      setError("Please upload valid JSON file(s).");
     }
   }, []);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
+    const files = Array.from(e.target.files ?? []);
+    if (files.length > 0) {
+      setSelectedFiles(files);
       setError(null);
     }
   }, []);
 
   const handleAnalyze = useCallback(async () => {
-    if (!selectedFile) return;
+    if (selectedFiles.length === 0) return;
     setIsLoading(true);
     setError(null);
     setResults(null);
     try {
+      // Single file → send as-is. Multiple files → merge client-side into one
+      // multi-tournament array (the API dedupes overlapping ballots by ID).
+      let uploadFile: File = selectedFiles[0];
+      if (selectedFiles.length > 1) {
+        const merged: unknown[] = [];
+        for (const f of selectedFiles) {
+          const text = await f.text();
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            throw new Error(`"${f.name}" is not valid JSON.`);
+          }
+          if (Array.isArray(parsed)) merged.push(...parsed);
+          else merged.push(parsed);
+        }
+        uploadFile = new File([JSON.stringify(merged)], "combined_upload.json", {
+          type: "application/json",
+        });
+      }
+
       const formData = new FormData();
-      formData.append("file", selectedFile);
+      formData.append("file", uploadFile);
       const response = await fetch("/api/analyze", { method: "POST", body: formData });
       if (!response.ok) {
         const errData = await response.json().catch(() => ({ error: "Unknown error" }));
@@ -778,7 +1160,7 @@ export default function HomePage() {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedFile]);
+  }, [selectedFiles]);
 
   const handleDownloadExcel = useCallback(() => {
     if (!results?.excel_base64) return;
@@ -804,6 +1186,19 @@ export default function HomePage() {
     : (results?.division_stats[activeDivision] ?? []);
 
   const activeSummary = isAll ? null : results?.division_summary[activeDivision];
+
+  // Recommendations for the active view, ordered by severity
+  const sevOrder: Record<SeverityLevel, number> = { critical: 0, high: 1, moderate: 2, watch: 3, normal: 4 };
+  const activeRecs: JudgeRecommendation[] = (
+    results?.recommendations
+      ? isAll
+        ? divisions.flatMap((d) => results.recommendations?.[d] ?? [])
+        : results.recommendations[activeDivision] ?? []
+      : []
+  )
+    .slice()
+    .sort((a, b) => sevOrder[a.severity_level] - sevOrder[b.severity_level]);
+  const flaggedCount = activeRecs.filter((r) => r.severity_level !== "normal").length;
 
   // Aggregated stats for "All Divisions" mode
   const allModeTotals = isAll && results
@@ -839,15 +1234,16 @@ export default function HomePage() {
             Judge<span style={{ color: C.gold }}>IQ</span>
           </h1>
           <p style={{ fontSize: 18, color: C.textSecondary, maxWidth: 560, margin: "0 auto 32px", lineHeight: 1.6 }}>
-            Premium judging analytics for competitive debate. Surface bias, Z-severity scores, and Mann-Whitney significance from any Tabroom export.
+            Premium judging analytics for competitive debate. Surface bias, quantify severity, and get concrete tab-room recommendations from any Tabroom export.
           </p>
 
           <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 10 }}>
             {[
               { icon: "⚖️", label: "Bias Detection" },
+              { icon: "🧠", label: "Tab Room Recommendations" },
               { icon: "σ", label: "Z-Severity Index" },
               { icon: "U", label: "Mann-Whitney U" },
-              { icon: "📊", label: "Distribution Chart" },
+              { icon: "📊", label: "Data Visualizations" },
               { icon: "📥", label: "Excel Export" },
             ].map(({ icon, label }) => (
               <span
@@ -884,7 +1280,7 @@ export default function HomePage() {
               onDrop={handleDrop}
               onClick={() => fileInputRef.current?.click()}
               style={{
-                border: `2px dashed ${isDragging ? C.gold : selectedFile ? C.green : C.navyBorder}`,
+                border: `2px dashed ${isDragging ? C.gold : selectedFiles.length > 0 ? C.green : C.navyBorder}`,
                 borderRadius: 12,
                 padding: "40px 24px",
                 textAlign: "center",
@@ -892,7 +1288,7 @@ export default function HomePage() {
                 transition: "all 0.2s",
                 background: isDragging
                   ? C.goldDim
-                  : selectedFile
+                  : selectedFiles.length > 0
                   ? "rgba(74,232,138,0.05)"
                   : "rgba(15,27,45,0.5)",
               }}
@@ -901,26 +1297,42 @@ export default function HomePage() {
                 ref={fileInputRef}
                 type="file"
                 accept=".json,application/json"
+                multiple
                 style={{ display: "none" }}
                 onChange={handleFileSelect}
               />
-              {selectedFile ? (
+              {selectedFiles.length > 0 ? (
                 <div>
                   <div style={{ fontSize: 36, marginBottom: 10 }}>✓</div>
-                  <p style={{ color: C.green, fontWeight: 700, fontSize: 16 }}>{selectedFile.name}</p>
-                  <p style={{ color: C.textMuted, fontSize: 13, marginTop: 4 }}>
-                    {(selectedFile.size / 1024).toFixed(1)} KB — Click to change
+                  {selectedFiles.length === 1 ? (
+                    <p style={{ color: C.green, fontWeight: 700, fontSize: 16 }}>{selectedFiles[0].name}</p>
+                  ) : (
+                    <>
+                      <p style={{ color: C.green, fontWeight: 700, fontSize: 16 }}>
+                        {selectedFiles.length} files selected — will be merged
+                      </p>
+                      <div style={{ marginTop: 8, maxHeight: 96, overflowY: "auto" }}>
+                        {selectedFiles.map((f) => (
+                          <p key={f.name} style={{ color: C.textSecondary, fontSize: 12, margin: "2px 0", fontFamily: "monospace" }}>
+                            {f.name}
+                          </p>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <p style={{ color: C.textMuted, fontSize: 13, marginTop: 6 }}>
+                    {(selectedFiles.reduce((s, f) => s + f.size, 0) / 1024).toFixed(1)} KB total — Click to change
                   </p>
                 </div>
               ) : (
                 <div>
                   <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.35 }}>⬆</div>
                   <p style={{ color: C.textSecondary, fontWeight: 600, fontSize: 16, marginBottom: 4 }}>
-                    Drag & drop your JSON file here
+                    Drag & drop your JSON file(s) here
                   </p>
-                  <p style={{ color: C.textMuted, fontSize: 13 }}>or click to browse</p>
+                  <p style={{ color: C.textMuted, fontSize: 13 }}>or click to browse — multiple rounds/tournaments merge automatically</p>
                   <p style={{ color: C.navyBorder, fontSize: 12, marginTop: 10, borderTop: `1px solid ${C.navyBorder}`, paddingTop: 10 }}>
-                    Supported: .json (Tabroom export)
+                    Supported: .json (Tabroom export) — duplicate ballots across files are deduped
                   </p>
                 </div>
               )}
@@ -945,19 +1357,19 @@ export default function HomePage() {
 
             <button
               onClick={handleAnalyze}
-              disabled={!selectedFile || isLoading}
+              disabled={selectedFiles.length === 0 || isLoading}
               style={{
                 marginTop: 20,
                 width: "100%",
                 padding: "14px 0",
                 borderRadius: 12,
                 border: "none",
-                cursor: !selectedFile || isLoading ? "not-allowed" : "pointer",
+                cursor: selectedFiles.length === 0 || isLoading ? "not-allowed" : "pointer",
                 fontWeight: 700,
                 fontSize: 15,
                 transition: "all 0.2s",
-                background: !selectedFile || isLoading ? C.navyBorder : C.gold,
-                color: !selectedFile || isLoading ? C.textMuted : C.navy,
+                background: selectedFiles.length === 0 || isLoading ? C.navyBorder : C.gold,
+                color: selectedFiles.length === 0 || isLoading ? C.textMuted : C.navy,
               }}
             >
               {isLoading ? (
@@ -1117,6 +1529,19 @@ export default function HomePage() {
             </div>
           )}
 
+          {/* Recommendations */}
+          {activeRecs.length > 0 && (
+            <div style={{ marginBottom: 28 }}>
+              <Card>
+                <SectionHeader
+                  title={`Tab Room Recommendations${flaggedCount > 0 ? ` — ${flaggedCount} judge${flaggedCount === 1 ? "" : "s"} flagged` : ""}`}
+                  sub="What to do about judges scoring statistically differently: normalization adjustments, round placement, monitoring, and ready-to-send judge feedback."
+                />
+                <RecommendationsPanel recs={activeRecs} showDivision={isAll} />
+              </Card>
+            </div>
+          )}
+
           {/* Charts Row */}
           <div style={{ marginBottom: 28 }}>
             {isAll ? (
@@ -1162,6 +1587,19 @@ export default function HomePage() {
               </div>
             )}
           </div>
+
+          {/* Judge Severity Chart — single division only (Z is relative to each division's pool) */}
+          {!isAll && activeRows.length > 1 && (
+            <div style={{ marginBottom: 28 }}>
+              <Card>
+                <SectionHeader
+                  title="Judge Severity — Z-Score Comparison"
+                  sub="Each bar is a judge's Z-severity vs the division pool. Dashed lines at ±1.5 mark the high-concern threshold."
+                />
+                <JudgeSeverityChart rows={activeRows} />
+              </Card>
+            </div>
+          )}
 
           {/* Severity Ranking Table(s) */}
           {isAll ? (
